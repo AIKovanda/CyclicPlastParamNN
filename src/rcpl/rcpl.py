@@ -9,7 +9,10 @@ SQR32 = np.sqrt(1.5)
 
 
 class Experiment:
-    def __init__(self, epsp: np.ndarray | torch.Tensor = None, **meta):
+    def __init__(self, epsp: list | np.ndarray | torch.Tensor = None, **meta):
+        assert epsp is not None
+        if isinstance(epsp, list):
+            epsp = np.array(epsp)
         self._epsp = epsp
         self.meta = meta
 
@@ -30,6 +33,9 @@ class Experiment:
         epsp = np.concatenate(epsp)
         return epsp
 
+    def __len__(self):
+        return len(self.epsp)
+
 
 class RandomCyclicPlasticLoadingParams(abc.ABC):
     """
@@ -38,12 +44,12 @@ class RandomCyclicPlasticLoadingParams(abc.ABC):
     """
 
     def __init__(self, params: dict = None, scaled_params: np.ndarray | torch.Tensor = None, experiment=None,
-                 use_torch=True):
+                 use_torch=False):
         assert (params is None) ^ (scaled_params is None)  # xor - we need exactly one of them to be set
         # params are always stored as a dictionary of unscaled parameters
+        self.uses_torch = use_torch
         self.params = params if params is not None else self.unscale_params(scaled_params)
         self.experiment = experiment
-        self.uses_torch = use_torch
 
     @classmethod
     def scaling_coefficients(cls) -> dict:
@@ -86,8 +92,8 @@ class RandomCyclicPlasticLoadingParams(abc.ABC):
             }
         return {
             'k0': self.unscale(scaled_params[0], scaling_coef['k0']),
-            'kap': [self.unscale(scaled_params[1], scaling_coef['kap'][0]),
-                    1 / self.unscale(scaled_params[2], scaling_coef['kap'][1])],
+            'kap': np.array([self.unscale(scaled_params[1], scaling_coef['kap'][0]),
+                             1 / self.unscale(scaled_params[2], scaling_coef['kap'][1])]),
             'c': np.exp(np.array(
                 [self.unscale(scaled_params[i + 3], coef) for i, coef in enumerate(scaling_coef['c'])])),
             'a': np.array([self.unscale(a, scaling_coef['a']) for a in scaled_params[3 + c_len:]]),
@@ -113,7 +119,7 @@ class RandomCyclicPlasticLoadingParams(abc.ABC):
         return num * var + e
 
     @classmethod
-    def generate_params(cls, experiment=None, use_torch=True):
+    def generate_params(cls, experiment=None, use_torch=False, **kwargs):
         """
         Generates random parameters for the cyclic plastic loading model. Returns an instance of this class.
         """
@@ -138,7 +144,7 @@ class RandomCyclicPlasticLoadingParams(abc.ABC):
         else:
             params = {
                 'k0': np.random.uniform(150, 250),
-                'kap': [np.random.uniform(100, 10000), 1 / np.random.uniform(30, 150)],
+                'kap': np.array([np.random.uniform(100, 10000), 1 / np.random.uniform(30, 150)]),
                 'c': np.sort([np.exp(np.random.uniform(np.log(1000), np.log(10000))),
                               *np.exp(np.random.uniform(np.log(50), np.log(2000), size=c_len - 1))])[::-1],
                 'a': a,
@@ -199,7 +205,7 @@ class RandomCyclicPlasticLoadingParams4D(RandomCyclicPlasticLoadingParams):
         }
 
 
-def random_cyclic_plastic_loading(kap: np.ndarray, a: np.ndarray, c: np.ndarray, epsp: np.ndarray):
+def random_cyclic_plastic_loading(k0: float, kap: np.ndarray, a: np.ndarray, c: np.ndarray, epsp: np.ndarray):
     epspc = np.zeros_like(epsp)
     epspc[1:] = np.cumsum(np.abs(epsp[1:] - epsp[:-1]))
 
@@ -207,15 +213,15 @@ def random_cyclic_plastic_loading(kap: np.ndarray, a: np.ndarray, c: np.ndarray,
     signs = np.sign(directors)
     # Find where the product of consecutive signs is -1 (indicating a sign change)
     reversal_ids = np.append(np.where(signs[:-1] * signs[1:] == -1)[0], -1)  # -1 so that index never reaches it
-    return random_cyclic_plastic_loading_engine(kap, a, c, epsp, epspc, directors, reversal_ids)
+    return random_cyclic_plastic_loading_engine(k0, kap, a, c, epsp, epspc, directors, reversal_ids)
 
 
 @jit(nopython=True)  # this makes the function much faster by compiling it to machine code
-def random_cyclic_plastic_loading_engine(kap: np.ndarray, a: np.ndarray, c: np.ndarray,
+def random_cyclic_plastic_loading_engine(k0: float, kap: np.ndarray, a: np.ndarray, c: np.ndarray,
                                          epsp: np.ndarray, epspc: np.ndarray,
                                          directors: np.ndarray, reversal_ids: np.ndarray):
-    kiso = directors / kap[2] * (1 - (1 - kap[0] * kap[2]) * np.exp(-SQR32 * kap[1] * kap[
-        2] * epspc))  # Vyvoj kiso jako funkce epspc, rovnou orientovane ve smeru narustajici plasticke deformace.
+    kiso = directors / kap[1] * (1 - (1 - k0 * kap[1]) * np.exp(-SQR32 * kap[0] * kap[
+        1] * epspc))  # Vyvoj kiso jako funkce epspc, rovnou orientovane ve smeru narustajici plasticke deformace.
     #    kiso = kiso + directors/kap[4]*(1-np.exp(-SQR32 * kap[3] * kap[4] * epspc))  # Odkomentuj k aktivaci druhe funkce isotropniho zpevneni
     #    kiso = kiso + directors/kap[6]*(1-np.exp(-SQR32 * kap[5] * kap[6] * epspc))  # Odkomentuj k aktivaci treti funkce isotropniho zpevneni
     assert len(kiso) == len(epsp)
@@ -239,7 +245,7 @@ def random_cyclic_plastic_loading_engine(kap: np.ndarray, a: np.ndarray, c: np.n
     return sig
 
 
-def random_cyclic_plastic_loading_t(kap: torch.Tensor, a: torch.Tensor, c: torch.Tensor, epsp: torch.Tensor):
+def random_cyclic_plastic_loading_t(k0: float, kap: torch.Tensor, a: torch.Tensor, c: torch.Tensor, epsp: torch.Tensor):
     epspc = torch.zeros_like(epsp, device=epsp.device)
     epspc[1:] = torch.cumsum(torch.abs(epsp[1:] - epsp[:-1]), dim=0)
 
@@ -248,15 +254,15 @@ def random_cyclic_plastic_loading_t(kap: torch.Tensor, a: torch.Tensor, c: torch
     # Find where the product of consecutive signs is -1 (indicating a sign change)
     product_of_consecutive_signs = signs[:-1] * signs[1:]
     reversal_ids = torch.cat(
-        (torch.where(product_of_consecutive_signs == -1)[0], torch.tensor([-1], device=epsp.device)))  # -1 so that index never reaches it
-    return random_cyclic_plastic_loading_engine_t(kap, a, c, epsp, epspc, directors, reversal_ids)
+        (torch.where(product_of_consecutive_signs == -1)[0],
+         torch.tensor([-1], device=epsp.device)))  # -1 so that index never reaches it
+    return random_cyclic_plastic_loading_engine_t(k0, kap, a, c, epsp, epspc, directors, reversal_ids)
 
 
-def random_cyclic_plastic_loading_engine_t(kap: torch.Tensor, a: torch.Tensor, c: torch.Tensor,
+def random_cyclic_plastic_loading_engine_t(k0: float, kap: torch.Tensor, a: torch.Tensor, c: torch.Tensor,
                                            epsp: torch.Tensor, epspc: torch.Tensor,
                                            directors: torch.Tensor, reversal_ids: torch.Tensor):
-
-    kiso = directors / kap[2] * (1 - (1 - kap[0] * kap[2]) * torch.exp(-SQR32 * kap[1] * kap[2] * epspc))
+    kiso = directors / kap[1] * (1 - (1 - k0 * kap[1]) * torch.exp(-SQR32 * kap[0] * kap[1] * epspc))
     assert len(kiso) == len(epsp)
     alp = torch.zeros((len(a), len(epsp)), dtype=torch.float64, device=epsp.device)
     alp_ref = torch.zeros(len(a), dtype=torch.float64, device=epsp.device)
@@ -284,23 +290,13 @@ def rt(theta: torch.Tensor, epsp: torch.Tensor) -> torch.Tensor:
     )
 
 
-def get_random_pseudo_experiment(dim, experiment: Experiment = None, scaled_params=None, **rcpl_kwargs):
-    assert (experiment is None) ^ (scaled_params is None)  # xor - we need exactly one of them to be set
-    if experiment is not None:
-        to_eval = f"RandomCyclicPlasticLoadingParams{dim}D.generate_params"
-    else:
+def get_random_pseudo_experiment(dim, kappa_dim, experiment: Experiment, scaled_params=None):
+    if scaled_params is not None:
         to_eval = f"RandomCyclicPlasticLoadingParams{dim}D"
-    model_params = eval(to_eval).generate_params(
+    else:
+        to_eval = f"RandomCyclicPlasticLoadingParams{dim}D.generate_params"
+    model_params = eval(to_eval)(
         experiment=experiment,
         scaled_params=scaled_params,
     )
-    return random_cyclic_plastic_loading(model_params, **rcpl_kwargs)
-
-
-class FromScaledParams:
-    def __init__(self, dim, **rcpl_kwargs):
-        self.dim = dim
-        self.rcpl_kwargs = rcpl_kwargs
-
-    def __call__(self, scaled_params):
-        return get_random_pseudo_experiment(self.dim, scaled_params=scaled_params, **self.rcpl_kwargs)
+    return random_cyclic_plastic_loading(**model_params.params, epsp=experiment.epsp), model_params
