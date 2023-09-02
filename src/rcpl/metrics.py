@@ -2,12 +2,12 @@ import numpy as np
 import torch
 
 
-def x_l(x_pred: torch.Tensor, x_true: torch.Tensor, p=2, **kwargs) -> float:
-    return float(torch.norm(x_pred - x_true, p=p))
+def x_l2(x_pred: torch.Tensor, x_true: torch.Tensor, **kwargs) -> float:
+    return float(torch.norm(x_pred - x_true, p=2))
 
 
-def y_l(y_pred: torch.Tensor, y_true: torch.Tensor, p=2, **kwargs) -> np.array:
-    return torch.norm(y_pred - y_true, p=p, dim=0).cpu().numpy()
+def y_l2(y_pred: torch.Tensor, y_true: torch.Tensor, **kwargs) -> np.array:
+    return torch.norm(y_pred - y_true, p=2, dim=0).cpu().numpy()
 
 
 def x_collect(x_pred: torch.Tensor, x_true: torch.Tensor, **kwargs) -> np.ndarray:

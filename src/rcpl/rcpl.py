@@ -9,6 +9,13 @@ SQR32 = np.sqrt(1.5)
 
 
 class Experiment:
+    PARAM_RANGE = {  # todo
+        'k0': (150, 250),
+        'kap': ((100, 10000), (1 / 150, 1 / 30)),
+        'c': ((np.log(1000), np.log(10000)), (np.log(50), np.log(2000))),
+        'a': (0, 350),
+    }
+
     def __init__(self, epsp: list | np.ndarray | torch.Tensor = None, **meta):
         assert epsp is not None
         if isinstance(epsp, list):
@@ -116,7 +123,7 @@ class RandomCyclicPlasticLoadingParams(abc.ABC):
     @staticmethod
     def unscale(num, e_var: tuple[float, float]) -> float:
         e, var = e_var
-        return num * var + e
+        return max(1e-9, num * var + e)
 
     @classmethod
     def generate_params(cls, experiment=None, use_torch=False, **kwargs):
@@ -131,19 +138,20 @@ class RandomCyclicPlasticLoadingParams(abc.ABC):
         else:
             a = np.random.uniform(0, 1, size=c_len)
             a /= np.sum(a)
-        a = np.random.uniform(250, 350) * a
+        a = np.random.uniform(150, 350) * a
+
         if use_torch:
             params = {
-                'k0': torch.Tensor([np.random.uniform(150, 250)]),
-                'kap': torch.Tensor([np.random.uniform(100, 10000), 1 / np.random.uniform(30, 150)]),
+                'k0': torch.Tensor([np.random.uniform(10, 250)]),
+                'kap': torch.Tensor([np.random.uniform(100, 10000), 1 / np.random.uniform(30, 200)]),
                 'c': torch.from_numpy(np.sort([np.exp(np.random.uniform(np.log(1000), np.log(10000))),
-                                               *np.exp(np.random.uniform(np.log(50), np.log(2000), size=c_len - 1))])[
+                                               *np.exp(np.random.uniform(np.log(1e-9), np.log(2000), size=c_len - 1))])[
                                       ::-1].copy()),
                 'a': a,
             }
         else:
             params = {
-                'k0': np.random.uniform(150, 250),
+                'k0': np.random.uniform(15, 250),
                 'kap': np.array([np.random.uniform(100, 10000), 1 / np.random.uniform(30, 150)]),
                 'c': np.sort([np.exp(np.random.uniform(np.log(1000), np.log(10000))),
                               *np.exp(np.random.uniform(np.log(50), np.log(2000), size=c_len - 1))])[::-1],
@@ -299,4 +307,7 @@ def get_random_pseudo_experiment(dim, kappa_dim, experiment: Experiment, scaled_
         experiment=experiment,
         scaled_params=scaled_params,
     )
-    return random_cyclic_plastic_loading(**model_params.params, epsp=experiment.epsp), model_params
+    sig = random_cyclic_plastic_loading(**model_params.params, epsp=experiment.epsp)
+    if sig.max() > 5000:
+        print(f'Parameters: {model_params.params}. Max of sig is {sig.max()}.')
+    return sig, model_params

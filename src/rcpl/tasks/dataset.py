@@ -10,7 +10,7 @@ from torch.utils.data import Dataset
 from tqdm import trange
 
 
-class DatasetDir(Task):
+class DatasetDirTask(Task):
     class Meta:
         input_tasks = []
         parameters = [
@@ -42,7 +42,20 @@ class DatasetDir(Task):
         return data
 
 
-class GetRandomPseudoExperiment(Task):
+class ExperimentTask(Task):
+    class Meta:
+        data_class = InMemoryData
+        input_tasks = []
+        parameters = [
+            Parameter("epsp", default=None),
+        ]
+
+    def run(self, epsp: list | None) -> Experiment:
+        exp = Experiment(epsp=epsp)
+        return exp
+
+
+class GetRandomPseudoExperimentTask(Task):
     class Meta:
         data_class = InMemoryData
         input_tasks = []
@@ -55,10 +68,10 @@ class GetRandomPseudoExperiment(Task):
         return partial(get_random_pseudo_experiment, dim=dim, kappa_dim=kappa_dim)
 
 
-class TrainDataset(Task):
+class TrainDatasetTask(Task):
     class Meta:
         data_class = InMemoryData
-        input_tasks = [DatasetDir]
+        input_tasks = [DatasetDirTask]
         parameters = [
             Parameter("epsp", default=None),
         ]
@@ -68,10 +81,10 @@ class TrainDataset(Task):
         return RCLPDataset(exp, 'train', dataset_dir=dataset_dir)
 
 
-class ValDataset(Task):
+class ValDatasetTask(Task):
     class Meta:
         data_class = InMemoryData
-        input_tasks = [DatasetDir]
+        input_tasks = [DatasetDirTask]
         parameters = [
             Parameter("epsp", default=None),
         ]
@@ -84,7 +97,7 @@ class ValDataset(Task):
 class TestGen(Task):
     class Meta:
         data_class = InMemoryData
-        input_tasks = [DatasetDir]
+        input_tasks = [DatasetDirTask]
         parameters = [
             Parameter("epsp", default=None),
         ]
@@ -92,3 +105,23 @@ class TestGen(Task):
     def run(self, epsp: list | None, dataset_dir: Path) -> Dataset:
         exp = Experiment(epsp=epsp)
         return RCLPDataset(exp, 'test', dataset_dir=dataset_dir)
+
+
+class DatasetInfoTask(Task):
+    class Meta:
+        input_tasks = []
+        data_class = InMemoryData
+        parameters = [
+            Parameter("param_labels", default=None),
+            Parameter("dim"),
+            Parameter("kappa_dim"),
+            Parameter("split"),
+        ]
+
+    def run(self, param_labels, dim, kappa_dim, split) -> dict:
+        return {
+            'param_labels': param_labels,
+            'dim': dim,
+            'kappa_dim': kappa_dim,
+            'split': split,
+        }

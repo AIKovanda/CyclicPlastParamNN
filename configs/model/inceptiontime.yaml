@@ -1,16 +1,21 @@
 tasks: rcpl.tasks.processing.*
 uses: "{CONFIGS_DIR}/dataset/2023-08-27.experiment.yaml"
 
-architecture: TransformerNet
+architecture: InceptionTime
 model_parameters:
-  d_model: 32
-  in_dim: 1
-  enc_dim: 31
-  nhead: 2
-  num_layers: 2
-  str_len: 601
-  outs: 11
-  embedding: null
+  batchnorm: true
+  build_config:
+    - bottleneck_channels: 32
+      kernel_sizes: [11, 21, 41]
+      n_filters: 32
+      # pooling_size: 8
+      # pooling_type: max
+      use_batch_norm: true
+      # activation: sigmoid
+
+  out_activation: none
+  in_channels: 1
+  outputs: 11
 
 # training_params:
 optim: 'AdamW'
@@ -19,6 +24,7 @@ optim_kwargs:
   betas: [0.9, 0.99]
   eps: .00000001
   weight_decay: 0.01
+
 epochs: 10
 scheduler: "torch.optim.lr_scheduler.CosineAnnealingLR(opt, len(train_ldr) * epochs + 1)"
 exec_str: 'nn.utils.clip_grad_value_(net.parameters(), 0.5)'
@@ -33,8 +39,8 @@ num_workers: 12
 drop_last: true
 
 valid_batch_size: 256
-do_compile: false
-run_name: "transformer"
+do_compile: true
+run_name: "inceptiontime"
 
 
 x_metrics:
