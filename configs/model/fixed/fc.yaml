@@ -1,16 +1,13 @@
 tasks: rcpl.tasks.processing.*
-uses: "{CONFIGS_DIR}/dataset/2023-08-27.experiment.yaml"
+uses: "{CONFIGS_DIR}/dataset/2023-08-27.fixed.2_4.standard.yaml"
 
-architecture: TransformerNet
+architecture: FC
 model_parameters:
-  d_model: 32
-  in_dim: 1
-  enc_dim: 31
-  nhead: 2
-  num_layers: 2
-  str_len: 601
-  outs: 11
-  embedding: null
+  inputs: 601
+  layers: [256, 128]
+  outputs: 11
+  in_channels: 1
+  batchnorm: true
 
 # training_params:
 optim: 'AdamW'
@@ -19,6 +16,7 @@ optim_kwargs:
   betas: [0.9, 0.99]
   eps: .00000001
   weight_decay: 0.01
+
 epochs: 10
 scheduler: "torch.optim.lr_scheduler.CosineAnnealingLR(opt, len(train_ldr) * epochs + 1)"
 exec_str: 'nn.utils.clip_grad_value_(net.parameters(), 0.5)'
@@ -32,13 +30,16 @@ shuffle: true
 num_workers: 12
 drop_last: true
 
-valid_batch_size: 256
-do_compile: false
-run_name: "transformer"
 
+valid_batch_size: 256
+do_compile: true
+run_dir: "standard"
+run_name: "fc"
 
 x_metrics:
   x_l2: 'metrics.x_l2'
 
 y_metrics:
   y_l2: 'metrics.y_l2'
+
+# chosen_checkpoint: 199

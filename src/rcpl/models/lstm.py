@@ -3,11 +3,13 @@ from torch import nn
 
 
 class LSTM(nn.Module):
-    def __init__(self, in_channels, hidden_size, layers, outputs, batchnorm=True, bidirectional=False):
+    def __init__(self, in_channels, hidden_size, layers, outputs, batchnorm=True, bidirectional=False, first_last=False,
+                 fc_layers: list[int] = None):
         super().__init__()
         self.hidden_size = hidden_size
         self.layers = layers
         self.batchnorm = batchnorm
+        self.first_last = first_last
         self.rnn = nn.LSTM(in_channels, hidden_size, layers, batch_first=True, bidirectional=bidirectional)
 
         self.bn_layer = nn.BatchNorm1d(in_channels)
@@ -16,7 +18,11 @@ class LSTM(nn.Module):
         # or:
         # self.gru = nn.GRU(input_size, hidden_size, num_layers, batch_first=True)
         # self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden_size * (2 if bidirectional else 1), outputs)
+        fc_sizes = [hidden_size * (2 if bidirectional else 1) * (2 if first_last else 1)]
+        if fc_layers is not None:
+            fc_sizes.extend(fc_layers)
+        fc_sizes.append(outputs)
+        self.fcs = nn.ModuleList([nn.Linear(fc_sizes[i], fc_sizes[i + 1]) for i in range(len(fc_sizes) - 1)])
 
     def forward(self, x: torch.Tensor):
         if self.batchnorm:
@@ -37,9 +43,14 @@ class LSTM(nn.Module):
         # out: (n, 28, 128)
 
         # Decode the hidden state of the last time step
-        out = out[:, -1, :]
+        if self.first_last:
+            out = torch.cat((out[:, 0, :], out[:, -1, :]), dim=1)
+        else:
+            out = out[:, -1, :]
         # out: (n, 128)
-
-        out = self.fc(out)
-        # out: (n, 10)
+        for i, fc in enumerate(self.fcs):
+            out = fc(out)
+            # relu everywhere expect last layer
+            if i < len(self.fcs) - 1:
+                out = torch.relu(out)
         return out

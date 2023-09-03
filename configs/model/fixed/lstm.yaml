@@ -1,5 +1,5 @@
 tasks: rcpl.tasks.processing.*
-uses: "{CONFIGS_DIR}/dataset/2023-08-27.experiment.yaml"
+uses: "{CONFIGS_DIR}/dataset/2023-08-27.fixed.2_4.standard.yaml"
 
 architecture: LSTM
 model_parameters:
@@ -9,6 +9,7 @@ model_parameters:
   hidden_size: 128
   outputs: 11
   bidirectional: true
+  first_last: true
 
 # training_params:
 optim: 'AdamW'
@@ -34,7 +35,8 @@ drop_last: true
 
 valid_batch_size: 256
 do_compile: true
-run_name: "bilstm"
+run_dir: "standard"
+run_name: "bilstm-fl"
 
 x_metrics:
   x_l2: 'metrics.x_l2'

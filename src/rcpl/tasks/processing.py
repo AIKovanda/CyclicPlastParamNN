@@ -52,6 +52,7 @@ class TrainModelTask(Task):
             Parameter("num_workers", default=-1, ignore_persistence=True),
             Parameter("drop_last", default=True),
             Parameter("do_compile", default=True, ignore_persistence=True),
+            Parameter("run_dir", ignore_persistence=True),
             Parameter("run_name", ignore_persistence=True),
             Parameter("device", default="cuda", ignore_persistence=True),
             Parameter("x_metrics", default=None, ignore_persistence=True),
@@ -75,7 +76,7 @@ class TrainModelTask(Task):
 
         param_labels = dataset_info['param_labels']
         train_ldr = DataLoader(val_dataset, batch_size=valid_batch_size, shuffle=False, num_workers=num_workers,
-                               drop_last=drop_last)
+                               drop_last=drop_last, pin_memory=True)
 
         reporter = Reporter(batch_size=valid_batch_size)
 
@@ -105,8 +106,10 @@ class TrainModelTask(Task):
             epochs: int, scheduler: str, exec_str: str, save_metrics_n: int, checkpoint_n: int, evaluate_n: int,
             batch_size: int, valid_batch_size: int, shuffle: bool, num_workers: int, drop_last: bool,
             do_compile: bool, train_dataset: Dataset, val_dataset: Dataset, get_random_pseudo_experiment: Callable,
-            run_name: str, device: str, x_metrics: dict | None, y_metrics: dict | None) -> DirData:
+            run_name: str, run_dir: str, device: str, x_metrics: dict | None, y_metrics: dict | None) -> DirData:
 
+        print(f"\n###\n\nTraining model {run_name} with {architecture} architecture\n\nmodel_parameters: {model_parameters}\n\n###\n")
+        torch.set_float32_matmul_precision('high')
         param_labels = dataset_info['param_labels']
         x_metrics = get_metrics(x_metrics)
         y_metrics = get_metrics(y_metrics)
@@ -120,7 +123,7 @@ class TrainModelTask(Task):
         torch.manual_seed(1)
         np.random.seed(1)
 
-        runs_dir = RUNS_DIR / run_name
+        runs_dir = RUNS_DIR / run_dir / run_name
         runs_dir.mkdir(parents=True, exist_ok=True)
         writer = SummaryWriter(runs_dir)
 
@@ -137,7 +140,7 @@ class TrainModelTask(Task):
         loss_func = nn.MSELoss()
         opt = eval(f"torch.optim.{optim}")(net.parameters(), **optim_kwargs)
 
-        train_ldr = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, drop_last=drop_last)
+        train_ldr = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, drop_last=drop_last, pin_memory=True)
         scheduler = eval(scheduler)
 
         try:
