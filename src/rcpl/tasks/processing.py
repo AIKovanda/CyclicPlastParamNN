@@ -81,7 +81,7 @@ class TrainModelTask(Task):
         reporter = Reporter(batch_size=valid_batch_size)
 
         loss_func = nn.MSELoss()
-        for batch_id, (batch_x, batch_y, epsp) in enumerate(train_ldr):
+        for batch_id, (batch_x, batch_y, *epsp) in enumerate(train_ldr):
             x_true = batch_x.to(device)
             y_true = batch_y.to(device)
             with torch.no_grad():
@@ -95,6 +95,10 @@ class TrainModelTask(Task):
                         reporter.add_deque(f'{param_name}/val', param_value, use_max_len=False)
 
                 # comparing x_pred and x_true
+                if len(epsp) == 0:
+                    epsp = x_true[:, 1, :]
+                else:
+                    epsp = epsp[0]
                 for sample_id, (x_i_true, y_i_pred_npy, epsp_i) in enumerate(zip(x_true.detach().cpu(), y_pred.detach().cpu().numpy(), epsp.cpu().numpy())):
                     x_i_pred = torch.unsqueeze(torch.from_numpy(get_random_pseudo_experiment(scaled_params=y_i_pred_npy, experiment=Experiment(epsp_i))[0]), 0)
                     for metric_name, metric_func in x_metrics.items():
@@ -147,7 +151,7 @@ class TrainModelTask(Task):
             total_batch_id = 0
             for epoch_id in range(epochs):
                 batch_iterator = tqdm(train_ldr, ncols=120, position=0)
-                for batch_id, (batch_x, batch_y, epsp) in enumerate(batch_iterator):
+                for batch_id, (batch_x, batch_y, *epsp) in enumerate(batch_iterator):
                     x_true = batch_x.to(device)
                     y_true = batch_y.to(device)
                     y_pred = net(x_true)
@@ -168,6 +172,10 @@ class TrainModelTask(Task):
                                 reporter.add_deque(f'{param_name}/train', param_value, is_batched=True)
 
                         # comparing x_pred and x_true
+                        if len(epsp) == 0:
+                            epsp = x_true[:, 1, :]
+                        else:
+                            epsp = epsp[0]
                         for sample_id, (x_i_true, y_i_pred_npy, epsp_i) in enumerate(
                                 zip(x_true.detach().cpu(), y_pred.detach().cpu().numpy(), epsp.cpu().numpy())):
                             x_i_pred = torch.unsqueeze(torch.from_numpy(get_random_pseudo_experiment(scaled_params=y_i_pred_npy, experiment=Experiment(epsp_i))[0]),

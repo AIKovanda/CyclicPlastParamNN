@@ -20,7 +20,7 @@ optim_kwargs:
   eps: .00000001
   weight_decay: 0.01
 
-epochs: 10
+epochs: 15
 scheduler: "torch.optim.lr_scheduler.CosineAnnealingLR(opt, len(train_ldr) * epochs + 1)"
 exec_str: 'nn.utils.clip_grad_value_(net.parameters(), 0.5)'
 save_metrics_n: 100
@@ -37,7 +37,7 @@ drop_last: true
 valid_batch_size: 256
 do_compile: true
 run_dir: "standard"
-run_name: "bigru-fl-fc-8"
+run_name: "bigru-fl-fc-8-15ep"
 
 x_metrics:
   x_l2: 'metrics.x_l2'

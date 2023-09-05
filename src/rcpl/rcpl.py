@@ -9,20 +9,37 @@ SQR32 = np.sqrt(1.5)
 
 
 class Experiment:
-    def __init__(self, epsp: list | np.ndarray | torch.Tensor = None, **meta):
+    def __init__(self, epsp: list | np.ndarray | torch.Tensor, **meta):
         assert epsp is not None
         if isinstance(epsp, list):
             epsp = np.array(epsp)
-        self._epsp = epsp
+        self.epsp = epsp
         self.meta = meta
 
-    @property
-    def epsp(self):
-        if self._epsp is None:
-            depspc_r = np.random.uniform(0.0005, 0.005, self.meta['depspc_r_number'])
-            self._epsp = self.depsp_r2epsp(depspc_r)
-            raise NotImplementedError
-        return self._epsp
+    @classmethod
+    def random_experiment(cls, uniform_params: tuple[int, int, int], points_per_segment: int, method="geometric",
+                          first_last_ratio=20, **meta):
+        epsp_r = np.append(0, np.random.uniform(*uniform_params))
+        epsp_r[::2] *= -1
+        if method == "linear":
+            epsp = [np.array([0])]
+            for segment_id in range(uniform_params[-1]):
+                epsp.append(np.linspace(epsp_r[segment_id], epsp_r[segment_id + 1], points_per_segment+1)[1:])
+            epsp = np.concatenate(epsp)
+
+        elif method == "geometric":
+            r = first_last_ratio ** (1 / (points_per_segment - 2))  # Ratio between steps.
+            geospace = np.array([r ** i for i in range(1, points_per_segment+1)])
+            geospace /= np.sum(geospace)
+            geospace = np.cumsum(geospace)
+            epsp = [0]
+            for segment_id in range(uniform_params[-1]):
+                epsp.extend(
+                    [epsp_r[segment_id + 1] * geo_val + (1 - geo_val) * epsp_r[segment_id] for geo_val in geospace])
+            epsp = np.array(epsp)
+        else:
+            raise ValueError(f"Unknown method {method}.")
+        return cls(epsp=epsp, **meta)
 
     @staticmethod
     def depsp_r2epsp(depsp_r: np.ndarray) -> np.ndarray:
@@ -191,12 +208,13 @@ def random_cyclic_plastic_loading_engine_t(k0: float, kap: torch.Tensor, a: torc
 
 
 @torch.compile
-def rt(theta: torch.Tensor, epsp: torch.Tensor) -> torch.Tensor:  # todo
+def rt(theta: torch.Tensor, epsp: torch.Tensor, dim, kappa_dim) -> torch.Tensor:
     return random_cyclic_plastic_loading_t(
         epsp=epsp,
-        kap=theta[:3],
-        c=theta[3:7],
-        a=theta[7:11],
+        k0=theta[:1],
+        kap=theta[1:1 + kappa_dim],
+        c=theta[1 + kappa_dim:1 + kappa_dim + dim],
+        a=theta[1 + kappa_dim + dim:],
     )
 
 

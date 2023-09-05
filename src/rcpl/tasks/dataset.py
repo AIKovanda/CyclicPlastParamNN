@@ -1,13 +1,14 @@
-from functools import partial
 from pathlib import Path
 from typing import Callable
 
 import numpy as np
-from rcpl.dataset import RCLPDataset
-from rcpl.rcpl import Experiment, get_random_pseudo_experiment, RandomCyclicPlasticLoadingParams
+import torch
 from taskchain import InMemoryData, Parameter, Task, DirData
 from torch.utils.data import Dataset
 from tqdm import trange
+
+from rcpl.dataset import RCLPDataset
+from rcpl.rcpl import Experiment, get_random_pseudo_experiment, RandomCyclicPlasticLoadingParams
 
 
 class DatasetInfoTask(Task):
@@ -15,19 +16,25 @@ class DatasetInfoTask(Task):
         input_tasks = []
         parameters = [
             Parameter("epsp", default=None),
+            Parameter("random_experiment_params", default=None, dont_persist_default_value=True),
             Parameter("dim"),
             Parameter("kappa_dim"),
             Parameter("split"),
             Parameter("n_samples_for_stats"),
-            Parameter("scale_type", default=None),
         ]
 
-    def run(self, epsp, dim, kappa_dim, split, n_samples_for_stats, scale_type) -> dict:
-        experiment = Experiment(epsp=epsp)
+    def run(self, epsp, random_experiment_params, dim, kappa_dim, split, n_samples_for_stats) -> dict:
+        assert (epsp is not None) ^ (random_experiment_params is not None)
+        if epsp is not None:
+            experiment = Experiment(epsp=epsp)
+        else:
+            experiment = Experiment.random_experiment(**random_experiment_params)
+
         param_arr = np.zeros((n_samples_for_stats, 1+kappa_dim+2*dim), dtype=np.float64)
         for i in trange(n_samples_for_stats, desc='Generating random parameters'):
             if epsp is None:
-                experiment = Experiment(epsp=epsp)
+                experiment = Experiment.random_experiment(**random_experiment_params)
+
             model_params = RandomCyclicPlasticLoadingParams.generate_params(
                 experiment=experiment,
                 dim=dim,
@@ -60,50 +67,41 @@ class DatasetInfoTask(Task):
             'param_std': param_std.tolist(),
             'param_min': param_min.tolist(),
             'param_max': param_max.tolist(),
-            'scale_type': scale_type,
         }
 
 
 class DatasetDirTask(Task):
     class Meta:
-        input_tasks = [
-            DatasetInfoTask,
-        ]
+        input_tasks = []
         parameters = [
             Parameter("epsp", default=None),
+            Parameter("random_experiment_params", default=None, dont_persist_default_value=True),
             Parameter("dim"),
             Parameter("kappa_dim"),
             Parameter("split"),
-            Parameter("scale_type", default=None),
         ]
 
-    def run(self, dataset_info: dict, epsp: list | None, dim: int, kappa_dim: int, split: tuple, scale_type: str | None) -> DirData:
-        exp = Experiment(epsp=epsp)
+    def run(self, random_experiment_params: dict | None, epsp: list | None, dim: int, kappa_dim: int, split: tuple) -> DirData:
+        assert (epsp is not None) ^ (random_experiment_params is not None)
+        if epsp is not None:
+            exp = Experiment(epsp=epsp)
+        else:
+            exp = Experiment.random_experiment(**random_experiment_params)
         data: DirData = self.get_data_object()
         dataset_dir = data.dir
 
-        x = np.zeros((split[-1], len(exp)), dtype=np.float32)
-        y = np.zeros((split[-1], 1+kappa_dim+2*dim), dtype=np.float32)
+        x = np.zeros((split[-1], (2 if epsp is None else 1), len(exp)), dtype=np.float32)
+        y = np.zeros((split[-1], 1+kappa_dim+2*dim), dtype=np.float64)
 
         for i in trange(split[-1]):
             if epsp is None:
-                exp = Experiment(epsp=epsp)
+                exp = Experiment.random_experiment(**random_experiment_params)
             sig, model_params = get_random_pseudo_experiment(dim=dim, kappa_dim=kappa_dim, experiment=exp)
-            x[i] = sig
+            x[i][0] = sig
+            if epsp is None:
+                assert len(exp.epsp) == len(sig)
+                x[i][1] = exp.epsp
             y[i] = model_params.vector_params
-
-        if scale_type is not None:
-            if scale_type == "standard":
-                mean = np.array(dataset_info['param_mean'])
-                std = np.array(dataset_info['param_std'])
-                y = (y - mean) / std
-
-            elif scale_type == "minmax":
-                min_ = np.array(dataset_info['param_min'])
-                max_ = np.array(dataset_info['param_max'])
-                y = (y - min_) / (max_ - min_)
-            else:
-                raise ValueError(f"Unknown scale_type: {scale_type}")
 
         for i, name in enumerate(['train', 'val', 'test']):
             np.save(str(dataset_dir / f'{name}_x.npy'), x[split[i]:split[i + 1], :])
@@ -169,40 +167,60 @@ class GetRandomPseudoExperimentTask(Task):
         return get_random_pseudo_experiment_
 
 
-class TrainDatasetTask(Task):
+class AbstractDatasetTask(Task):
+    class Meta:
+        abstract = True
+
+    def run(self, epsp: list | None, dataset_dir: Path, dataset_info: dict, scale_type: str) -> Dataset:
+        x = torch.from_numpy(np.load(dataset_dir / f'{self.meta.split_name}_x.npy'))
+        y = torch.from_numpy(np.load(dataset_dir / f'{self.meta.split_name}_y.npy'))
+
+        if scale_type is not None:
+            if scale_type == "standard":
+                mean = np.array(dataset_info['param_mean'])
+                std = np.array(dataset_info['param_std'])
+                y -= mean
+                y /= std
+
+            elif scale_type == "minmax":
+                min_ = np.array(dataset_info['param_min'])
+                max_ = np.array(dataset_info['param_max'])
+                y -= min_
+                y /= (max_ - min_)
+            else:
+                raise ValueError(f"Unknown scale_type: {scale_type}")
+
+        return RCLPDataset(x=x, y=y.float(), epsp=(np.array(epsp) if epsp is not None else None))
+
+
+class TrainDatasetTask(AbstractDatasetTask):
     class Meta:
         data_class = InMemoryData
-        input_tasks = [DatasetDirTask]
+        input_tasks = [DatasetDirTask, DatasetInfoTask]
         parameters = [
             Parameter("epsp", default=None),
+            Parameter("scale_type", default=None),
         ]
-
-    def run(self, epsp: list | None, dataset_dir: Path) -> Dataset:
-        exp = Experiment(epsp=epsp)
-        return RCLPDataset(exp, 'train', dataset_dir=dataset_dir)
+        split_name = 'train'
 
 
-class ValDatasetTask(Task):
+class ValDatasetTask(AbstractDatasetTask):
     class Meta:
         data_class = InMemoryData
-        input_tasks = [DatasetDirTask]
+        input_tasks = [DatasetDirTask, DatasetInfoTask]
         parameters = [
             Parameter("epsp", default=None),
+            Parameter("scale_type", default=None),
         ]
-
-    def run(self, epsp: list | None, dataset_dir: Path) -> Dataset:
-        exp = Experiment(epsp=epsp)
-        return RCLPDataset(exp, 'val', dataset_dir=dataset_dir)
+        split_name = 'val'
 
 
-class TestGen(Task):
+class TestDatasetTask(AbstractDatasetTask):
     class Meta:
         data_class = InMemoryData
-        input_tasks = [DatasetDirTask]
+        input_tasks = [DatasetDirTask, DatasetInfoTask]
         parameters = [
             Parameter("epsp", default=None),
+            Parameter("scale_type", default=None),
         ]
-
-    def run(self, epsp: list | None, dataset_dir: Path) -> Dataset:
-        exp = Experiment(epsp=epsp)
-        return RCLPDataset(exp, 'test', dataset_dir=dataset_dir)
+        split_name = 'test'
