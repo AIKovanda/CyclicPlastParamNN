@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from numba import jit
 
-SQR23 = np.sqrt(2. / 3.)
+SQR23 = np.sqrt(2./3.)
 SQR32 = np.sqrt(1.5)
 
 
@@ -40,15 +40,6 @@ class Experiment:
         else:
             raise ValueError(f"Unknown method {method}.")
         return cls(epsp=epsp, **meta)
-
-    @staticmethod
-    def depsp_r2epsp(depsp_r: np.ndarray) -> np.ndarray:
-        epsp_r = np.append(0, np.cumsum(depsp_r))
-        epsp = []
-        for segment_id in range(12):
-            epsp.append(np.linspace(epsp_r[segment_id], epsp_r[segment_id + 1], 21)[:-1])  # todo: geometric
-        epsp = np.concatenate(epsp)
-        return epsp
 
     def __len__(self):
         return len(self.epsp)
@@ -172,7 +163,7 @@ def random_cyclic_plastic_loading_engine(k0: np.ndarray, kap: np.ndarray, a: np.
     return sig
 
 
-def random_cyclic_plastic_loading_t(k0: float, kap: torch.Tensor, a: torch.Tensor, c: torch.Tensor, epsp: torch.Tensor):
+def random_cyclic_plastic_loading_torch_batch(k0: torch.Tensor, kap: torch.Tensor, a: torch.Tensor, c: torch.Tensor, epsp: torch.Tensor):
     epspc = torch.zeros_like(epsp, device=epsp.device)
     epspc[1:] = torch.cumsum(torch.abs(epsp[1:] - epsp[:-1]), dim=0)
 
@@ -186,35 +177,45 @@ def random_cyclic_plastic_loading_t(k0: float, kap: torch.Tensor, a: torch.Tenso
     return random_cyclic_plastic_loading_engine_t(k0, kap, a, c, epsp, epspc, directors, reversal_ids)
 
 
-def random_cyclic_plastic_loading_engine_t(k0: float, kap: torch.Tensor, a: torch.Tensor, c: torch.Tensor,
+def random_cyclic_plastic_loading_engine_t(k0: torch.Tensor, kap: torch.Tensor, a: torch.Tensor, c: torch.Tensor,
                                            epsp: torch.Tensor, epspc: torch.Tensor,
                                            directors: torch.Tensor, reversal_ids: torch.Tensor):
-    kiso = directors / kap[1] * (1 - (1 - k0 * kap[1]) * torch.exp(-SQR32 * kap[0] * kap[1] * epspc))
-    assert len(kiso) == len(epsp)
-    alp = torch.zeros((len(a), len(epsp)), dtype=torch.float64, device=epsp.device)
-    alp_ref = torch.zeros(len(a), dtype=torch.float64, device=epsp.device)
+    kiso = directors.repeat(kap.shape[0], 1) / kap[:, 1:2] * (1 - (1 - k0 * kap[:, 1:2]) * torch.exp(-SQR32 * kap[:, 0:1] * kap[:, 1:2] * epspc))
+    alp = torch.zeros((*a.shape, len(epsp)), dtype=kap.dtype, device=epsp.device)
+    alp_ref = torch.zeros(*a.shape, dtype=kap.dtype, device=epsp.device)
     epsp_ref = epsp[0]
     k = 0
     for i, epsp_i in enumerate(epsp):
         depsp = torch.abs(epsp_i - epsp_ref)
-        alp[:, i] = directors[i] * a - (directors[i] * a - alp_ref) * torch.exp(-c * depsp)
+        alp[..., i] = directors[i] * a - (directors[i] * a - alp_ref) * torch.exp(-c * depsp)
         if i == reversal_ids[k]:  # Use .item() to extract the value from the tensor
-            alp_ref = alp[:, i]
+            alp_ref = alp[..., i]
             epsp_ref = epsp_i
             k += 1
 
-    sig = SQR32 * torch.sum(alp, dim=0) + kiso
+    sig = SQR32 * torch.sum(alp, dim=1) + kiso
     return sig
 
 
 @torch.compile
-def rt(theta: torch.Tensor, epsp: torch.Tensor, dim, kappa_dim) -> torch.Tensor:
-    return random_cyclic_plastic_loading_t(
+def rcpl_torch_one(theta: torch.Tensor, epsp: torch.Tensor, dim, kappa_dim) -> torch.Tensor:
+    return random_cyclic_plastic_loading_torch_batch(
         epsp=epsp,
-        k0=theta[:1],
-        kap=theta[1:1 + kappa_dim],
-        c=theta[1 + kappa_dim:1 + kappa_dim + dim],
-        a=theta[1 + kappa_dim + dim:],
+        k0=torch.unsqueeze(theta[:1], 0),
+        kap=torch.unsqueeze(theta[1:1 + kappa_dim], 0),
+        c=torch.unsqueeze(theta[1 + kappa_dim:1 + kappa_dim + dim], 0),
+        a=torch.unsqueeze(theta[1 + kappa_dim + dim:], 0),
+    )[0]
+
+
+#@torch.compile
+def rcpl_torch_batch(theta: torch.Tensor, epsp: torch.Tensor, dim, kappa_dim) -> torch.Tensor:
+    return random_cyclic_plastic_loading_torch_batch(
+        epsp=epsp,
+        k0=theta[:, :1],
+        kap=theta[:, 1:1 + kappa_dim],
+        c=theta[:, 1 + kappa_dim:1 + kappa_dim + dim],
+        a=theta[:, 1 + kappa_dim + dim:],
     )
 
 

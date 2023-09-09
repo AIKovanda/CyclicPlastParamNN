@@ -2,13 +2,15 @@ from pathlib import Path
 from typing import Callable
 
 import numpy as np
+import pandas as pd
 import torch
 from taskchain import InMemoryData, Parameter, Task, DirData
 from torch.utils.data import Dataset
 from tqdm import trange
 
+from rcpl.config import REAL_EXPERIMENT
 from rcpl.dataset import RCLPDataset
-from rcpl.rcpl import Experiment, get_random_pseudo_experiment, RandomCyclicPlasticLoadingParams
+from rcpl.rcpl import Experiment, get_random_pseudo_experiment, RandomCyclicPlasticLoadingParams, rcpl_torch_one
 
 
 class DatasetInfoTask(Task):
@@ -30,25 +32,29 @@ class DatasetInfoTask(Task):
         else:
             experiment = Experiment.random_experiment(**random_experiment_params)
 
-        param_arr = np.zeros((n_samples_for_stats, 1+kappa_dim+2*dim), dtype=np.float64)
+        x = np.zeros((n_samples_for_stats, len(experiment)), dtype=np.float32)
+        y = np.zeros((n_samples_for_stats, 1+kappa_dim+2*dim), dtype=np.float64)
         for i in trange(n_samples_for_stats, desc='Generating random parameters'):
             if epsp is None:
                 experiment = Experiment.random_experiment(**random_experiment_params)
 
-            model_params = RandomCyclicPlasticLoadingParams.generate_params(
-                experiment=experiment,
-                dim=dim,
-                kappa_dim=kappa_dim,
-            )
-            param_arr[i] = model_params.vector_params
+            sig, model_params = get_random_pseudo_experiment(dim=dim, kappa_dim=kappa_dim, experiment=experiment)
+            x[i] = sig
+            y[i] = model_params.vector_params
 
         # calculate mean and std for each parameter
-        param_mean = np.mean(param_arr, axis=0)
-        param_std = np.std(param_arr, axis=0)
+        param_mean = np.mean(y, axis=0)
+        param_std = np.std(y, axis=0)
+
+        x_mean = np.mean(x)
+        x_std = np.std(x)
 
         # calculate min and max for each parameter
-        param_min = np.min(param_arr, axis=0)
-        param_max = np.max(param_arr, axis=0)
+        param_min = np.min(y, axis=0)
+        param_max = np.max(y, axis=0)
+
+        x_min = np.min(x)
+        x_max = np.max(x)
 
         model_params = RandomCyclicPlasticLoadingParams.generate_params(
             experiment=experiment,
@@ -67,6 +73,10 @@ class DatasetInfoTask(Task):
             'param_std': param_std.tolist(),
             'param_min': param_min.tolist(),
             'param_max': param_max.tolist(),
+            'x_mean': x_mean.tolist(),
+            'x_std': x_std.tolist(),
+            'x_min': x_min.tolist(),
+            'x_max': x_max.tolist(),
         }
 
 
@@ -148,6 +158,32 @@ class UnscaleParamsTask(Task):
             raise ValueError(f"Unknown scale_type: {scale_type}")
 
 
+class UnscaleParamsTorchTask(Task):
+    class Meta:
+        data_class = InMemoryData
+        input_tasks = [
+            DatasetInfoTask,
+        ]
+        parameters = [
+            Parameter("scale_type", default=None),
+            Parameter("device", default="cuda", ignore_persistence=True),
+        ]
+
+    def run(self, dataset_info: dict, scale_type: str | None, device: str) -> Callable:
+        if scale_type is None:
+            return lambda x: torch.clamp(x, min=1e-9, max=None)
+        if scale_type == "standard":
+            mean = torch.tensor(dataset_info['param_mean'], device=device)
+            std = torch.tensor(dataset_info['param_std'], device=device)
+            return lambda x: torch.clamp(x * std + mean, min=1e-9, max=None)
+        elif scale_type == "minmax":
+            min_ = torch.tensor(dataset_info['param_min'], device=device)
+            max_ = torch.tensor(dataset_info['param_max'], device=device)
+            return lambda x: torch.clamp(x * (max_ - min_) + min_, min=1e-9, max=None)
+        else:
+            raise ValueError(f"Unknown scale_type: {scale_type}")
+
+
 class GetRandomPseudoExperimentTask(Task):
     class Meta:
         data_class = InMemoryData
@@ -224,3 +260,68 @@ class TestDatasetTask(AbstractDatasetTask):
             Parameter("scale_type", default=None),
         ]
         split_name = 'test'
+
+
+class GetCrlbTask(Task):
+    class Meta:
+        data_class = InMemoryData
+        input_tasks = [
+            UnscaleParamsTask,
+        ]
+        parameters = [
+            Parameter("dim"),
+            Parameter("kappa_dim"),
+            Parameter("scale_type", default=None),
+        ]
+
+    def run(self, unscale_params: callable, dim: int, kappa_dim: int) -> Callable:
+
+        def get_crlb_(epsp, unscaled_params):
+            assert epsp is not None
+            assert len(unscaled_params.shape) == 1
+            theta = unscaled_params.detach().cpu().clone().type(torch.float64)
+            theta.requires_grad = True
+            sig_pred = rcpl_torch_one(epsp=torch.tensor(epsp, dtype=torch.float64), theta=theta, dim=dim, kappa_dim=kappa_dim)
+
+            grad_a = torch.zeros((len(theta), len(sig_pred)), dtype=torch.float64)
+            for id_ in trange(len(sig_pred), desc='Calculating gradients of theta'):
+                if theta.grad is not None:
+                    theta.grad.zero_()
+
+                # Backpropagate for the current element
+                sig_pred[id_].backward(retain_graph=True)
+                grad_a[:, id_] = theta.grad
+
+            fm_a = grad_a @ grad_a.T
+            # regularize
+            fm_a += torch.eye(len(theta)) * 1e-9
+            var = torch.inverse(fm_a).diag()
+            return {
+                'theta': theta.detach().cpu().numpy(),
+                'var': var.detach().cpu().numpy(),
+                'std': np.sqrt(var.detach().cpu().numpy()),
+                'relative_std': np.sqrt(var.detach().cpu().numpy()) / theta.detach().cpu().numpy(),
+            }
+        return get_crlb_
+
+
+class RealExperimentTask(Task):
+    class Meta:
+        data_class = InMemoryData
+        input_tasks = [
+        ]
+        parameters = [
+            Parameter("x_len"),
+        ]
+
+    def run(self, x_len) -> dict[str, np.ndarray]:
+        sigs = {}
+        for exp_name, exp_config in REAL_EXPERIMENT.items():
+            df_exp = pd.read_csv(exp_config['path'])
+            sig = df_exp[exp_config['signal_col']].to_numpy()
+            if x_len is not None:
+                sig = sig[:x_len]
+            sigs[exp_name] = sig
+
+        return sigs
+

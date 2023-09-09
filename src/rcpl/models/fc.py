@@ -15,6 +15,7 @@ class FC(nn.Module):
         self.bn_layer = nn.BatchNorm1d(in_channels)
 
     def forward(self, x: torch.Tensor):
+        print(x.shape)
         if self.batchnorm:
             x = self.bn_layer(x)
         x = x.reshape(x.shape[0], -1)
