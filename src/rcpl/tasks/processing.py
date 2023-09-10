@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Callable
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from taskchain import Parameter, Task, DirData, InMemoryData
@@ -17,10 +18,34 @@ from rcpl.config import RUNS_DIR, REAL_EXPERIMENT
 from rcpl.rcpl import Experiment, rcpl_torch_batch, rcpl_torch_one
 from rcpl.reporter import Reporter
 from rcpl.tasks.dataset import TrainDatasetTask, ValDatasetTask, GetRandomPseudoExperimentTask, DatasetInfoTask, \
-    UnscaleParamsTorchTask, RealExperimentTask, GetCrlbTask
+    UnscaleParamsTorchTask, GetCrlbTask
 
 from functools import partial
 from rcpl import metrics, models
+
+
+class RealExperimentTask(Task):
+    class Meta:
+        data_class = InMemoryData
+        input_tasks = [
+        ]
+        parameters = [
+            Parameter("takes_length"),
+            Parameter("takes_epsp"),
+        ]
+
+    def run(self, takes_length, takes_epsp) -> dict[str, np.ndarray]:
+        sigs = {}
+        for exp_name, exp_config in REAL_EXPERIMENT.items():
+            df_exp = pd.read_csv(exp_config['path'])
+            sig = df_exp[exp_config['signal_col']].to_numpy()
+            if takes_length is not None:
+                sig = sig[:takes_length]
+            if takes_epsp:
+                sig = np.vstack([sig, np.array([exp_config['epsp']])])
+            sigs[exp_name] = sig
+
+        return sigs
 
 
 def get_metrics(metrics_config: dict | None):
@@ -42,8 +67,8 @@ class LossFuncTask(Task):
         data_class = InMemoryData
         input_tasks = [UnscaleParamsTorchTask, DatasetInfoTask]
         parameters = [
-            Parameter("loss_func", default='MSELoss', dont_persist_default_value=True),
-            Parameter("loss_func_kwargs", default=None, dont_persist_default_value=True),
+            Parameter("loss_func", default='MSELoss'),
+            Parameter("loss_func_kwargs", default=None),
         ]
 
     def run(self, loss_func: str, loss_func_kwargs: dict, unscale_params_torch, dataset_info: dict) -> Callable:
@@ -58,10 +83,10 @@ class LossFuncTask(Task):
             def loss_func(y_pred, y_true, x_true, epsp):
                 # unscale
                 y_pred_unscaled = unscale_params_torch(y_pred)
-                x_pred = rcpl_torch_batch(theta=y_pred_unscaled, epsp=epsp[0].float().to(y_pred_unscaled.device), dim=dataset_info['dim'], kappa_dim=dataset_info['kappa_dim'])
+                x_pred = rcpl_torch_batch(theta=y_pred_unscaled, epsp=epsp.float().to(y_pred_unscaled.device), dim=dataset_info['dim'], kappa_dim=dataset_info['kappa_dim'])
                 # normalize
                 mse_loss = F.mse_loss(
-                    x_pred / dataset_info['x_std'],
+                    x_pred[:, :] / dataset_info['x_std'],
                     x_true[:, 0, :] / dataset_info['x_std'],
                     reduction="mean") * loss_func_kwargs.get('x_grad_scale', 1)
                 if (y_ratio := loss_func_kwargs.get('y_ratio', 0)) > 0:
@@ -148,7 +173,7 @@ class TrainModelTask(Task):
                 for sample_id, (x_i_true, y_i_pred_npy, epsp_i) in enumerate(zip(x_true.detach().cpu(), y_pred.detach().cpu().numpy(), epsp.cpu().numpy())):
                     x_i_pred = torch.unsqueeze(torch.from_numpy(get_random_pseudo_experiment(scaled_params=y_i_pred_npy, experiment=Experiment(epsp_i))[0]), 0)
                     for metric_name, metric_func in x_metrics.items():
-                        reporter.add_deque(f'{metric_name}/val', metric_func(x_pred=x_i_pred, x_true=x_i_true), use_max_len=False)
+                        reporter.add_deque(f'{metric_name}/val', metric_func(x_pred=x_i_pred[:1], x_true=x_i_true[:1]), use_max_len=False)
         net.train()
         return reporter.get_mean_deque()
 
@@ -230,7 +255,7 @@ class TrainModelTask(Task):
                             x_i_pred = torch.unsqueeze(torch.from_numpy(get_random_pseudo_experiment(scaled_params=y_i_pred_npy, experiment=Experiment(epsp_i))[0]),
                                                        0)
                             for metric_name, metric_func in x_metrics.items():
-                                reporter.add_deque(metric_name, metric_func(x_pred=x_i_pred, x_true=x_i_true), is_batched=False)
+                                reporter.add_deque(metric_name, metric_func(x_pred=x_i_pred[:1], x_true=x_i_true[:1]), is_batched=False)
 
                         if save_metrics_n and total_batch_id % save_metrics_n == save_metrics_n - 1:
 
@@ -355,33 +380,38 @@ class ModelInfoTask(Task):
         parameters = [
             Parameter("architecture"),
             Parameter("model_parameters"),
-            Parameter("run_name", ignore_persistence=True),
+            Parameter("run_name"),
+            Parameter("run_dir"),
+            Parameter("takes_epsp"),
         ]
 
-    def run(self, architecture: str, model_parameters: dict, run_name: str) -> dict:
+    def run(self, architecture: str, model_parameters: dict, run_name: str, run_dir: str, takes_epsp: bool) -> dict:
         return {
             'architecture': architecture,
             'model_parameters': model_parameters,
             'run_name': run_name,
+            'run_dir': run_dir,
+            'takes_epsp': takes_epsp,
         }
 
 
 class ValidateCrlbTask(Task):
     class Meta:
-        input_tasks = [RealExperimentTask, GetCrlbTask, TrainedModelTask, UnscaleParamsTorchTask, DatasetInfoTask]
+        input_tasks = [RealExperimentTask, GetCrlbTask, TrainedModelTask, UnscaleParamsTorchTask, DatasetInfoTask,
+                       ModelInfoTask]
         parameters = [
             Parameter("device", default="cuda", ignore_persistence=True),
             Parameter("crlb_runs", default=1000),
         ]
 
     def run(self, real_experiment, get_crlb, trained_model, device, unscale_params_torch, crlb_runs,
-            dataset_info) -> dict:
+            dataset_info, model_info) -> dict:
         out = {}
         trained_model.eval()
         all_unscaled_params = torch.zeros((crlb_runs, 1 + 2 * dataset_info['dim'] + dataset_info['kappa_dim']))
         for experiment_name, sig in real_experiment.items():
             with torch.no_grad():
-                theta_hat = trained_model(torch.unsqueeze(torch.unsqueeze(torch.from_numpy(sig), 0), 0).float().to(device))[0]
+                theta_hat = trained_model(torch.unsqueeze(torch.from_numpy(sig), 0).float().to(device))[0]
             epsp = REAL_EXPERIMENT[experiment_name]['epsp']
             unscaled_params = unscale_params_torch(theta_hat)
             crlb = get_crlb(epsp, unscaled_params)
@@ -391,7 +421,11 @@ class ValidateCrlbTask(Task):
                     random_increment = torch.randn_like(theta_hat) * torch.from_numpy(crlb['std']).to(device) / 10000
                     unscaled_params_mod = torch.clip(unscaled_params + random_increment, min=1e-9, max=None)
                     sig_hat = rcpl_torch_one(theta=unscaled_params_mod, epsp=torch.tensor(epsp).to(device), dim=dataset_info['dim'], kappa_dim=dataset_info['kappa_dim'])
-                    theta_hat_hat = trained_model(torch.unsqueeze(torch.unsqueeze(sig_hat.float(), 0), 0).to(device))[0]
+                    if model_info['takes_epsp']:
+                        sig_hat = torch.unsqueeze(torch.vstack([sig_hat, torch.tensor([epsp]).to(device)]), 0).float()
+                    else:
+                        sig_hat = torch.unsqueeze(torch.unsqueeze(sig_hat.float(), 0), 0).to(device)
+                    theta_hat_hat = trained_model(sig_hat)[0]
                     all_unscaled_params[i] = (unscale_params_torch(theta_hat_hat) - random_increment).cpu()
 
             out[experiment_name] = {

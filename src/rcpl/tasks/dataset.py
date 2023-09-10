@@ -18,7 +18,7 @@ class DatasetInfoTask(Task):
         input_tasks = []
         parameters = [
             Parameter("epsp", default=None),
-            Parameter("random_experiment_params", default=None, dont_persist_default_value=True),
+            Parameter("random_experiment_params", default=None),
             Parameter("dim"),
             Parameter("kappa_dim"),
             Parameter("split"),
@@ -85,7 +85,7 @@ class DatasetDirTask(Task):
         input_tasks = []
         parameters = [
             Parameter("epsp", default=None),
-            Parameter("random_experiment_params", default=None, dont_persist_default_value=True),
+            Parameter("random_experiment_params", default=None),
             Parameter("dim"),
             Parameter("kappa_dim"),
             Parameter("split"),
@@ -303,25 +303,3 @@ class GetCrlbTask(Task):
                 'relative_std': np.sqrt(var.detach().cpu().numpy()) / theta.detach().cpu().numpy(),
             }
         return get_crlb_
-
-
-class RealExperimentTask(Task):
-    class Meta:
-        data_class = InMemoryData
-        input_tasks = [
-        ]
-        parameters = [
-            Parameter("x_len"),
-        ]
-
-    def run(self, x_len) -> dict[str, np.ndarray]:
-        sigs = {}
-        for exp_name, exp_config in REAL_EXPERIMENT.items():
-            df_exp = pd.read_csv(exp_config['path'])
-            sig = df_exp[exp_config['signal_col']].to_numpy()
-            if x_len is not None:
-                sig = sig[:x_len]
-            sigs[exp_name] = sig
-
-        return sigs
-

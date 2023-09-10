@@ -29,7 +29,7 @@ class Experiment:
 
         elif method == "geometric":
             r = first_last_ratio ** (1 / (points_per_segment - 2))  # Ratio between steps.
-            geospace = np.array([r ** i for i in range(1, points_per_segment+1)])
+            geospace = np.array([r ** i for i in range(1, points_per_segment)])
             geospace /= np.sum(geospace)
             geospace = np.cumsum(geospace)
             epsp = [0]
@@ -164,15 +164,18 @@ def random_cyclic_plastic_loading_engine(k0: np.ndarray, kap: np.ndarray, a: np.
 
 
 def random_cyclic_plastic_loading_torch_batch(k0: torch.Tensor, kap: torch.Tensor, a: torch.Tensor, c: torch.Tensor, epsp: torch.Tensor):
+    """
+    Each input parameter is a tensor of shape (batch_size, parameter_size), including EPSP. Epsp is expected to have
+    the same number of points in each segment so that directors, reversal_ids are identical for all samples in the batch.
+    """
     epspc = torch.zeros_like(epsp, device=epsp.device)
-    epspc[1:] = torch.cumsum(torch.abs(epsp[1:] - epsp[:-1]), dim=0)
+    epspc[:, 1:] = torch.cumsum(torch.abs(epsp[:, 1:] - epsp[:, :-1]), dim=1)
 
-    directors = torch.cat((torch.tensor([0], device=epsp.device), torch.sign(epsp[1:] - epsp[:-1])))
+    directors = torch.cat((torch.tensor([0], device=epsp.device), torch.sign(epsp[0, 1:] - epsp[0, :-1])))  # taking the first sample in the batch - the rest must be the same
     signs = torch.sign(directors)
     # Find where the product of consecutive signs is -1 (indicating a sign change)
-    product_of_consecutive_signs = signs[:-1] * signs[1:]
     reversal_ids = torch.cat(
-        (torch.where(product_of_consecutive_signs == -1)[0],
+        (torch.where(signs[:-1] * signs[1:] == -1)[0],
          torch.tensor([-1], device=epsp.device)))  # -1 so that index never reaches it
     return random_cyclic_plastic_loading_engine_t(k0, kap, a, c, epsp, epspc, directors, reversal_ids)
 
@@ -181,16 +184,16 @@ def random_cyclic_plastic_loading_engine_t(k0: torch.Tensor, kap: torch.Tensor, 
                                            epsp: torch.Tensor, epspc: torch.Tensor,
                                            directors: torch.Tensor, reversal_ids: torch.Tensor):
     kiso = directors.repeat(kap.shape[0], 1) / kap[:, 1:2] * (1 - (1 - k0 * kap[:, 1:2]) * torch.exp(-SQR32 * kap[:, 0:1] * kap[:, 1:2] * epspc))
-    alp = torch.zeros((*a.shape, len(epsp)), dtype=kap.dtype, device=epsp.device)
+    alp = torch.zeros((*a.shape, epsp.shape[-1]), dtype=kap.dtype, device=epsp.device)
     alp_ref = torch.zeros(*a.shape, dtype=kap.dtype, device=epsp.device)
-    epsp_ref = epsp[0]
+    epsp_ref = epsp[:, :1]
     k = 0
-    for i, epsp_i in enumerate(epsp):
-        depsp = torch.abs(epsp_i - epsp_ref)
+    for i in range(epsp.shape[-1]):
+        depsp = torch.abs(epsp[:, i: i+1] - epsp_ref)
         alp[..., i] = directors[i] * a - (directors[i] * a - alp_ref) * torch.exp(-c * depsp)
         if i == reversal_ids[k]:  # Use .item() to extract the value from the tensor
             alp_ref = alp[..., i]
-            epsp_ref = epsp_i
+            epsp_ref = epsp[:, i: i+1]
             k += 1
 
     sig = SQR32 * torch.sum(alp, dim=1) + kiso
@@ -200,7 +203,7 @@ def random_cyclic_plastic_loading_engine_t(k0: torch.Tensor, kap: torch.Tensor, 
 @torch.compile
 def rcpl_torch_one(theta: torch.Tensor, epsp: torch.Tensor, dim, kappa_dim) -> torch.Tensor:
     return random_cyclic_plastic_loading_torch_batch(
-        epsp=epsp,
+        epsp=torch.unsqueeze(epsp, 0),
         k0=torch.unsqueeze(theta[:1], 0),
         kap=torch.unsqueeze(theta[1:1 + kappa_dim], 0),
         c=torch.unsqueeze(theta[1 + kappa_dim:1 + kappa_dim + dim], 0),
