@@ -237,6 +237,6 @@ def get_random_pseudo_experiment(dim, kappa_dim, experiment: Experiment, vector_
             kappa_dim=kappa_dim,
         )
     sig = random_cyclic_plastic_loading(**model_params.params, epsp=experiment.epsp)
-    if sig.max() > 5000:
-        print(f'Parameters: {model_params.params}. Max of sig is {sig.max()}.')
+    # if sig.max() > 5000:
+    #     print(f'Parameters: {model_params.params}. Max of sig is {sig.max()}.')
     return sig, model_params

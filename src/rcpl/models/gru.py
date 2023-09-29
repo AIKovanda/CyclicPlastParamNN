@@ -23,7 +23,7 @@ class GRU(nn.Module):
         # -> x needs to be: (batch_size, seq, input_size)
 
         # or:
-        # self.gru = nn.GRU(input_size, hidden_size, num_layers, batch_first=True)
+        # self.gru1-shape = nn.GRU(input_size, hidden_size, num_layers, batch_first=True)
         # self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
         fc_sizes = [hidden_size * (2 if rnn_kwargs.get('bidirectional', False) else 1) * (segments_num+1 if segments_num is not None else (2 if first_last else 1))]
         if fc_layers is not None:

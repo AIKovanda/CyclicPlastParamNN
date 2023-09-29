@@ -8,20 +8,129 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from taskchain import Parameter, Task, DirData, InMemoryData
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
+from scipy.optimize import fmin
 from torch.utils.data import Dataset
 from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
 from tqdm import tqdm, trange
 
 from rcpl.config import RUNS_DIR, REAL_EXPERIMENT
-from rcpl.rcpl import Experiment, rcpl_torch_batch, rcpl_torch_one
+from rcpl.rcpl import Experiment, rcpl_torch_batch, rcpl_torch_one, random_cyclic_plastic_loading
 from rcpl.reporter import Reporter
 from rcpl.tasks.dataset import TrainDatasetTask, ValDatasetTask, GetRandomPseudoExperimentTask, DatasetInfoTask, \
-    UnscaleParamsTorchTask, GetCrlbTask
+    UnscaleParamsTorchTask, GetCrlbTask, TestDatasetTask, ScaleParamsTorchTask
 
 from functools import partial
 from rcpl import metrics, models
+
+
+# todo: put this to taskchain somehow
+lower_bound = np.array([15, 100, 0.006666666666666667, 1000, 50, 50, 50, 0.000000001, 0.000000001, 0.000000001, 0.000000001])  # Grid lower bound (number or list of len d)
+upper_bound = np.array([250, 10000, 0.03333333333333333, 10000, 2000, 2000, 2000, 350, 350, 350, 350])
+
+
+def to_optimize_one(theta_, stress_, epsp_, kappa_dim, dim) -> float:
+    theta_ = np.clip(theta_, a_min=lower_bound, a_max=upper_bound)
+    res = random_cyclic_plastic_loading(
+        k0=theta_[:1],
+        kap=theta_[1:1 + kappa_dim],
+        c=theta_[1 + kappa_dim:1 + kappa_dim + dim],
+        a=theta_[1 + kappa_dim + dim:],
+        epsp=epsp_,
+    )
+    return float(np.mean((res - stress_) ** 2))
+
+
+def simplex(unscaled_theta: np.ndarray, stress: np.ndarray, kappa_dim: int, dim: int, epsp: np.ndarray) -> tuple[
+    np.ndarray, list, list]:
+    opt_theta = np.zeros_like(unscaled_theta)
+    new_values = []
+    old_values = []
+    for i, (theta_i, stress_i, epsp_i) in enumerate(zip(unscaled_theta, stress, epsp)):
+        now_value = to_optimize_one(theta_i, stress_i, epsp_i, kappa_dim, dim)
+        # print('Now:', now_value)
+        new_theta = fmin(partial(to_optimize_one, stress_=stress_i, epsp_=epsp_i, kappa_dim=kappa_dim, dim=dim),
+                         theta_i, disp=0)
+
+        new_theta = np.clip(new_theta, a_min=lower_bound, a_max=upper_bound)
+        opt_theta[i] = new_theta
+        new_value = to_optimize_one(opt_theta[i], stress_i, epsp_i, kappa_dim, dim)
+        if now_value < new_value:
+            opt_theta[i] = theta_i
+            print('BUG - new is worse')
+        # print('New:', new_value)
+        # print('Old:', now_value)
+        new_values.append(new_value)
+        old_values.append(now_value)
+    return opt_theta, new_values, old_values
+
+
+def evaluate_model(valid_batch_size, dataset_info, x_metrics, y_metrics, net, val_dataset, device,
+                   num_workers, drop_last, get_random_pseudo_experiment, use_simplex=False, use_tqdm=False,
+                   tqdm_message=None, unscale_params_torch=None, scale_params_torch=None, prediction_is_scaled=True):
+    net.eval()
+
+    param_labels = dataset_info['param_labels']
+    train_ldr = DataLoader(val_dataset, batch_size=valid_batch_size, shuffle=False, num_workers=num_workers,
+                           drop_last=drop_last, pin_memory=True)
+
+    reporter = Reporter(batch_size=valid_batch_size)
+    loss_func = nn.MSELoss()
+    if use_tqdm:
+        train_ldr = tqdm(train_ldr, ncols=120, desc=tqdm_message)
+    for batch_id, (batch_x, batch_y, *epsp) in enumerate(train_ldr):
+        x_true = batch_x.to(device)
+        y_true = batch_y.to(device)
+        with torch.no_grad():
+            # comparing x_pred and x_true
+            if len(epsp) == 0:
+                epsp = x_true[:, 1, :]
+            else:
+                epsp = epsp[0]  # because *epsp gives a list of one element
+
+            y_pred_raw = net(x_true)
+            if use_simplex:
+                if prediction_is_scaled:
+                    unscaled_y_pred = unscale_params_torch(y_pred_raw)
+                else:
+                    unscaled_y_pred = y_pred_raw
+
+                unscaled_y_pred, new_values, old_values = simplex(
+                    unscaled_theta=unscaled_y_pred.cpu().numpy(),
+                    stress=x_true[:, 0, :].cpu().numpy(),
+                    kappa_dim=dataset_info['kappa_dim'],
+                    dim=dataset_info['dim'],
+                    epsp=epsp.cpu().numpy(),
+                )
+                unscaled_y_pred = torch.from_numpy(unscaled_y_pred).to(device)
+                reporter.add_deque('old_x_l2', np.mean(old_values), use_max_len=False, do_print=False)
+                reporter.add_deque('new_x_l2', np.mean(new_values), use_max_len=False, do_print=False)
+                y_pred_scaled = scale_params_torch(unscaled_y_pred)
+
+            else:
+                if prediction_is_scaled:
+                    y_pred_scaled = y_pred_raw
+                else:
+                    y_pred_scaled = scale_params_torch(y_pred_raw)
+            reporter.add_deque('Loss/val/_all', loss_func(y_pred_scaled, y_true).item(), use_max_len=False, do_print=False)
+            for metric_name, metric_func in y_metrics.items():
+                reporter.add_deque(f'{metric_name}/val', metric_func(y_pred=y_pred_scaled, y_true=y_true), use_max_len=False)
+
+            if param_labels is not None:
+                for param_value, param_name in zip(torch.mean((y_pred_scaled - y_true) ** 2, dim=0).cpu().numpy().tolist(),
+                                                   param_labels):
+                    reporter.add_deque(f'{param_name}/val', param_value, use_max_len=False)
+
+            for sample_id, (x_i_true, y_i_pred_npy, epsp_i) in enumerate(
+                    zip(x_true.detach().cpu(), y_pred_scaled.detach().cpu().numpy(), epsp.cpu().numpy())):
+                x_i_pred = torch.unsqueeze(torch.from_numpy(
+                    get_random_pseudo_experiment(scaled_params=y_i_pred_npy, experiment=Experiment(epsp_i))[0]), 0)
+                for metric_name, metric_func in x_metrics.items():
+                    reporter.add_deque(f'{metric_name}/val', metric_func(x_pred=x_i_pred[:1], x_true=x_i_true[:1]),
+                                       use_max_len=False, do_print=False)
+    net.train()
+    return reporter.get_mean_deque()
 
 
 class RealExperimentTask(Task):
@@ -43,6 +152,8 @@ class RealExperimentTask(Task):
                 sig = sig[:takes_length]
             if takes_epsp:
                 sig = np.vstack([sig, np.array([exp_config['epsp']])])
+            else:
+                sig = np.expand_dims(sig, 0)
             sigs[exp_name] = sig
 
         return sigs
@@ -77,21 +188,24 @@ class LossFuncTask(Task):
         if loss_func == 'MSELoss':
             def loss_func(y_pred, y_true, x_true, epsp):
                 return F.mse_loss(y_pred, y_true, reduction="mean")
+
             return loss_func
 
         elif loss_func == 'epsp':
             def loss_func(y_pred, y_true, x_true, epsp):
                 # unscale
                 y_pred_unscaled = unscale_params_torch(y_pred)
-                x_pred = rcpl_torch_batch(theta=y_pred_unscaled, epsp=epsp.float().to(y_pred_unscaled.device), dim=dataset_info['dim'], kappa_dim=dataset_info['kappa_dim'])
+                x_pred = rcpl_torch_batch(theta=y_pred_unscaled, epsp=epsp.float().to(y_pred_unscaled.device),
+                                          dim=dataset_info['dim'], kappa_dim=dataset_info['kappa_dim'])
                 # normalize
                 mse_loss = F.mse_loss(
                     x_pred[:, :] / dataset_info['x_std'],
                     x_true[:, 0, :] / dataset_info['x_std'],
                     reduction="mean") * loss_func_kwargs.get('x_grad_scale', 1)
                 if (y_ratio := loss_func_kwargs.get('y_ratio', 0)) > 0:
-                    mse_loss = (1-y_ratio) * mse_loss + y_ratio * F.mse_loss(y_pred, y_true, reduction="mean")
+                    mse_loss = (1 - y_ratio) * mse_loss + y_ratio * F.mse_loss(y_pred, y_true, reduction="mean")
                 return mse_loss
+
             return loss_func
         else:
             raise ValueError(f'Unknown loss function: {loss_func}')
@@ -110,14 +224,15 @@ class TrainModelTask(Task):
             Parameter("architecture"),
             Parameter("model_parameters"),
             Parameter("optim", default='AdamW'),
-            Parameter("optim_kwargs"),
-            Parameter("epochs"),
+            Parameter("optim_kwargs", default=None),
+            Parameter("epochs", default=1),
             Parameter("scheduler", default='None'),
             Parameter("exec_str", default=None),
             Parameter("save_metrics_n", default=100, ignore_persistence=True),
             Parameter("evaluate_n", default=300, ignore_persistence=True),
             Parameter("checkpoint_n", default=2000),
-            Parameter("batch_size"),
+            Parameter("batch_size", default=32),
+            Parameter("is_trainable", default=True, dont_persist_default_value=True),
             Parameter("valid_batch_size", ignore_persistence=True),
             Parameter("shuffle", default=True),
             Parameter("num_workers", default=-1, ignore_persistence=True),
@@ -140,57 +255,23 @@ class TrainModelTask(Task):
 
         return wrapper
 
-    @staticmethod
-    def evaluate_model(valid_batch_size, dataset_info, x_metrics, y_metrics, net, val_dataset, device,
-                       num_workers, drop_last, get_random_pseudo_experiment):
-        net.eval()
-
-        param_labels = dataset_info['param_labels']
-        train_ldr = DataLoader(val_dataset, batch_size=valid_batch_size, shuffle=False, num_workers=num_workers,
-                               drop_last=drop_last, pin_memory=True)
-
-        reporter = Reporter(batch_size=valid_batch_size)
-
-        loss_func = nn.MSELoss()
-        for batch_id, (batch_x, batch_y, *epsp) in enumerate(train_ldr):
-            x_true = batch_x.to(device)
-            y_true = batch_y.to(device)
-            with torch.no_grad():
-                y_pred = net(x_true)
-                reporter.add_deque('Loss/val/_all', loss_func(y_pred, y_true).item(), use_max_len=False)
-                for metric_name, metric_func in y_metrics.items():
-                    reporter.add_deque(f'{metric_name}/val', metric_func(y_pred=y_pred, y_true=y_true), use_max_len=False)
-
-                if param_labels is not None:
-                    for param_value, param_name in zip(torch.mean((y_pred - y_true) ** 2, dim=0).cpu().numpy().tolist(), param_labels):
-                        reporter.add_deque(f'{param_name}/val', param_value, use_max_len=False)
-
-                # comparing x_pred and x_true
-                if len(epsp) == 0:
-                    epsp = x_true[:, 1, :]
-                else:
-                    epsp = epsp[0]
-                for sample_id, (x_i_true, y_i_pred_npy, epsp_i) in enumerate(zip(x_true.detach().cpu(), y_pred.detach().cpu().numpy(), epsp.cpu().numpy())):
-                    x_i_pred = torch.unsqueeze(torch.from_numpy(get_random_pseudo_experiment(scaled_params=y_i_pred_npy, experiment=Experiment(epsp_i))[0]), 0)
-                    for metric_name, metric_func in x_metrics.items():
-                        reporter.add_deque(f'{metric_name}/val', metric_func(x_pred=x_i_pred[:1], x_true=x_i_true[:1]), use_max_len=False)
-        net.train()
-        return reporter.get_mean_deque()
-
     def run(self, dataset_info: dict, architecture: str, model_parameters: dict, optim: str, optim_kwargs: dict,
             epochs: int, scheduler: str, exec_str: str, save_metrics_n: int, checkpoint_n: int, evaluate_n: int,
             batch_size: int, valid_batch_size: int, shuffle: bool, num_workers: int, drop_last: bool,
             do_compile: bool, train_dataset: Dataset, val_dataset: Dataset, get_random_pseudo_experiment: Callable,
             run_name: str, run_dir: str, device: str, x_metrics: dict | None, y_metrics: dict | None,
-            loss_func: callable) -> DirData:
+            loss_func: callable, is_trainable: bool) -> DirData:
 
-        print(f"\n###\n\nTraining model {run_name} with {architecture} architecture\n\nmodel_parameters: {model_parameters}\n\n###\n")
+        data: DirData = self.get_data_object()
+        if not is_trainable:
+            return data
+        print(
+            f"\n###\n\nTraining model {run_name} with {architecture} architecture\n\nmodel_parameters: {model_parameters}\n\n###\n")
         torch.set_float32_matmul_precision('high')
         param_labels = dataset_info['param_labels']
         x_metrics = get_metrics(x_metrics)
         y_metrics = get_metrics(y_metrics)
 
-        data: DirData = self.get_data_object()
         print(f'Base dir: {data.dir}')
         with open(data.dir / f'model_parameters.json', 'w') as f:
             json.dump(model_parameters, f)
@@ -215,7 +296,8 @@ class TrainModelTask(Task):
 
         opt = eval(f"torch.optim.{optim}")(net.parameters(), **optim_kwargs)
 
-        train_ldr = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, drop_last=drop_last, pin_memory=True)
+        train_ldr = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers,
+                               drop_last=drop_last, pin_memory=True)
         scheduler = eval(scheduler)
 
         try:
@@ -246,16 +328,20 @@ class TrainModelTask(Task):
                             reporter.add_deque(metric_name, metric_func(y_pred=y_pred, y_true=y_true), is_batched=True)
 
                         if param_labels is not None:
-                            for param_value, param_name in zip(torch.mean((y_pred - y_true) ** 2, dim=0).cpu().numpy().tolist(), param_labels):
+                            for param_value, param_name in zip(
+                                    torch.mean((y_pred - y_true) ** 2, dim=0).cpu().numpy().tolist(), param_labels):
                                 reporter.add_deque(f'{param_name}/train', param_value, is_batched=True)
 
                         # comparing x_pred and x_true
                         for sample_id, (x_i_true, y_i_pred_npy, epsp_i) in enumerate(
                                 zip(x_true.detach().cpu(), y_pred.detach().cpu().numpy(), epsp.cpu().numpy())):
-                            x_i_pred = torch.unsqueeze(torch.from_numpy(get_random_pseudo_experiment(scaled_params=y_i_pred_npy, experiment=Experiment(epsp_i))[0]),
-                                                       0)
+                            x_i_pred = torch.unsqueeze(torch.from_numpy(
+                                get_random_pseudo_experiment(scaled_params=y_i_pred_npy, experiment=Experiment(epsp_i))[
+                                    0]),
+                                0)
                             for metric_name, metric_func in x_metrics.items():
-                                reporter.add_deque(metric_name, metric_func(x_pred=x_i_pred[:1], x_true=x_i_true[:1]), is_batched=False)
+                                reporter.add_deque(metric_name, metric_func(x_pred=x_i_pred[:1], x_true=x_i_true[:1]),
+                                                   is_batched=False)
 
                         if save_metrics_n and total_batch_id % save_metrics_n == save_metrics_n - 1:
 
@@ -264,16 +350,22 @@ class TrainModelTask(Task):
                             writer.add_scalar('Loss/train/_all', loss_val.item(), total_batch_id)
                             if param_labels is not None:
                                 for param_name in param_labels:
-                                    writer.add_scalar(f'{param_name}/train', reporter.get_mean_deque(f'{param_name}/train'), total_batch_id)
-                                    reporter.add_scalar(f'{param_name}/train', reporter.get_mean_deque(f'{param_name}/train'), total_batch_id)
+                                    writer.add_scalar(f'{param_name}/train',
+                                                      reporter.get_mean_deque(f'{param_name}/train'), total_batch_id)
+                                    reporter.add_scalar(f'{param_name}/train',
+                                                        reporter.get_mean_deque(f'{param_name}/train'), total_batch_id)
 
                             for metric_name, metric_func in chain(x_metrics.items(), y_metrics.items()):
-                                writer.add_scalar(f'{metric_name}/train', reporter.get_mean_deque(metric_name), total_batch_id)
-                                reporter.add_scalar(f'{metric_name}/train', reporter.get_mean_deque(metric_name), total_batch_id)
+                                writer.add_scalar(f'{metric_name}/train', reporter.get_mean_deque(metric_name),
+                                                  total_batch_id)
+                                reporter.add_scalar(f'{metric_name}/train', reporter.get_mean_deque(metric_name),
+                                                    total_batch_id)
 
                         if evaluate_n and total_batch_id % evaluate_n == evaluate_n - 1:
-                            for metric_name, metric_val in self.evaluate_model(valid_batch_size, dataset_info, x_metrics, y_metrics, net, val_dataset, device,
-                                           num_workers, drop_last, get_random_pseudo_experiment).items():
+                            for metric_name, metric_val in evaluate_model(valid_batch_size, dataset_info, x_metrics,
+                                                                          y_metrics, net, val_dataset, device,
+                                                                          num_workers, drop_last,
+                                                                          get_random_pseudo_experiment).items():
                                 writer.add_scalar(metric_name, metric_val, total_batch_id)
                                 reporter.add_scalar(metric_name, metric_val, total_batch_id)
 
@@ -286,7 +378,8 @@ class TrainModelTask(Task):
                     else:
                         opt.step()  # update weights
 
-                    batch_iterator.set_description(f'E{epoch_id+1}/{epochs}, LR: {scheduler.get_last_lr()[-1]: .5f}, Loss: {reporter.get_mean_deque("Loss/train"): .5f}')
+                    batch_iterator.set_description(
+                        f'E{epoch_id + 1}/{epochs}, LR: {scheduler.get_last_lr()[-1]: .5f}, Loss: {reporter.get_mean_deque("Loss/train"): .5f}')
                     total_batch_id += 1
                     scheduler.step()
 
@@ -352,13 +445,15 @@ class TrainedModelTask(Task):
         parameters = [
             Parameter("architecture"),
             Parameter("model_parameters"),
+            Parameter("is_trainable", default=True, dont_persist_default_value=True),
             Parameter("chosen_checkpoint", default=None),
             Parameter("do_compile", default=True, ignore_persistence=True),
             Parameter("device", default="cuda", ignore_persistence=True),
         ]
 
     def run(self, train_model: Path, architecture: str, model_parameters: dict, do_compile: bool, device: str,
-            chosen_checkpoint: int | None) -> nn.Module:
+            is_trainable: bool,
+            chosen_checkpoint: int | None) -> object:
         if chosen_checkpoint is not None:
             weights_path = train_model / f'weights_{chosen_checkpoint}.pt'
         else:
@@ -368,8 +463,8 @@ class TrainedModelTask(Task):
         net = net.to(device)
         if do_compile:
             net = torch.compile(net)
-
-        net.load_state_dict(torch.load(str(weights_path)))
+        if is_trainable:
+            net.load_state_dict(torch.load(str(weights_path)))
         return net
 
 
@@ -420,7 +515,8 @@ class ValidateCrlbTask(Task):
                     # uniform random increment
                     random_increment = torch.randn_like(theta_hat) * torch.from_numpy(crlb['std']).to(device) / 10000
                     unscaled_params_mod = torch.clip(unscaled_params + random_increment, min=1e-9, max=None)
-                    sig_hat = rcpl_torch_one(theta=unscaled_params_mod, epsp=torch.tensor(epsp).to(device), dim=dataset_info['dim'], kappa_dim=dataset_info['kappa_dim'])
+                    sig_hat = rcpl_torch_one(theta=unscaled_params_mod, epsp=torch.tensor(epsp).to(device),
+                                             dim=dataset_info['dim'], kappa_dim=dataset_info['kappa_dim'])
                     if model_info['takes_epsp']:
                         sig_hat = torch.unsqueeze(torch.vstack([sig_hat, torch.tensor([epsp]).to(device)]), 0).float()
                     else:
@@ -431,8 +527,58 @@ class ValidateCrlbTask(Task):
             out[experiment_name] = {
                 'theta_mean': torch.mean(all_unscaled_params, dim=0).numpy().tolist(),
                 'theta_std': torch.std(all_unscaled_params, dim=0).numpy().tolist(),
-                'theta_relative_std': (torch.std(all_unscaled_params, dim=0) / unscaled_params.detach().cpu()).numpy().tolist(),
+                'theta_relative_std': (
+                        torch.std(all_unscaled_params, dim=0) / unscaled_params.detach().cpu()).numpy().tolist(),
                 'crlb': {key: val.tolist() for key, val in crlb.items()},
             }
 
         return out
+
+
+class ModelMetricsTask(Task):
+    class Meta:
+        input_tasks = [
+            TrainedModelTask,
+            DatasetInfoTask,
+            TestDatasetTask,
+            GetRandomPseudoExperimentTask,
+            ScaleParamsTorchTask,
+            UnscaleParamsTorchTask
+        ]
+        parameters = [
+            Parameter("eval_batch_size", default=1, ignore_persistence=True),
+            Parameter("num_workers", default=-1, ignore_persistence=True),
+            Parameter("drop_last", default=True),
+            Parameter("run_dir", ignore_persistence=True),
+            Parameter("run_name", ignore_persistence=True),
+            Parameter("device", default="cuda", ignore_persistence=True),
+            Parameter("x_metrics", default=None, ignore_persistence=True),
+            Parameter("y_metrics", default=None, ignore_persistence=True),
+            Parameter("prediction_is_scaled", default=True, dont_persist_default_value=True),
+            Parameter("evaluate_limit", default=1024),
+        ]
+
+    def run(self, trained_model, dataset_info: dict, eval_batch_size: int, num_workers: int, drop_last: bool,
+            test_dataset: Dataset, get_random_pseudo_experiment: Callable, evaluate_limit: int,
+            run_name: str, run_dir: str, device: str, x_metrics: dict | None, y_metrics: dict | None,
+            scale_params_torch, unscale_params_torch, prediction_is_scaled) -> dict:
+        x_metrics = get_metrics(x_metrics)
+        y_metrics = get_metrics(y_metrics)
+        runs_dir = RUNS_DIR / run_dir / run_name
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        trained_model.eval()
+
+        dataset = Subset(test_dataset, indices=range(evaluate_limit)) if evaluate_limit > 0 else test_dataset
+        metric_results = {}
+        for dataset_type, use_simplex in zip(['simplex', 'raw'], [True, False]):
+            metric_results[dataset_type] = {
+                key: float(val) for key, val in
+                evaluate_model(eval_batch_size, dataset_info, x_metrics, y_metrics, trained_model, dataset, device,
+                               num_workers, drop_last, get_random_pseudo_experiment, use_simplex=use_simplex,
+                               use_tqdm=True, tqdm_message=f'{dataset_type}', unscale_params_torch=unscale_params_torch,
+                               scale_params_torch=scale_params_torch,
+                               prediction_is_scaled=prediction_is_scaled).items()}
+            print(f'{dataset_type} metrics: {metric_results[dataset_type]}')
+        with open(runs_dir / f'model_metrics.json', 'w') as f:
+            json.dump(metric_results, f)
+        return metric_results

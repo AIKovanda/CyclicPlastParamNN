@@ -346,7 +346,7 @@ class InceptionTime(nn.Module):
                 bottleneck_channels=bottleneck_channels[i],
                 use_residual=use_residuals[i],
                 use_batch_norm=node.get("use_batch_norm", True),
-                activation=activation_function
+                activation=activation_function,
             ))
 
             last_n_filters = current_n_filters

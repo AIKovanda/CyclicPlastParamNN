@@ -24,7 +24,9 @@ class Reporter:
             self._stats['stats'][key] = {}
         self._stats['stats'][key][id_] = value
 
-    def add_deque(self, key, value, is_batched=True, use_max_len=True):
+    def add_deque(self, key, value, is_batched=True, use_max_len=True, do_print=False):
+        if do_print:
+            print(key, value)
         if key not in self.deque_stats:
             if use_max_len:
                 self.deque_stats[key] = deque(maxlen=self.deque_max_len if is_batched else self.deque_max_len * self.batch_size)

@@ -184,6 +184,30 @@ class UnscaleParamsTorchTask(Task):
             raise ValueError(f"Unknown scale_type: {scale_type}")
 
 
+class ScaleParamsTorchTask(Task):
+    class Meta:
+        data_class = InMemoryData
+        input_tasks = [
+            DatasetInfoTask,
+        ]
+        parameters = [
+            Parameter("scale_type", default=None),
+            Parameter("device", default="cuda", ignore_persistence=True),
+        ]
+
+    def run(self, dataset_info: dict, scale_type: str | None, device: str) -> Callable:
+        if scale_type is None:
+            return lambda x: torch.clamp(x, min=1e-9, max=None)
+        if scale_type == "standard":
+            mean = torch.tensor(dataset_info['param_mean'], device=device)
+            std = torch.tensor(dataset_info['param_std'], device=device)
+            return lambda x: (x - mean) / std
+        elif scale_type == "minmax":
+            raise NotImplementedError
+        else:
+            raise ValueError(f"Unknown scale_type: {scale_type}")
+
+
 class GetRandomPseudoExperimentTask(Task):
     class Meta:
         data_class = InMemoryData

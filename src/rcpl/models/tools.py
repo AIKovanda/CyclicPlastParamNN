@@ -8,6 +8,8 @@ def get_activation(activation=None):
     activation = activation.lower()
     if activation == "selu":
         return nn.SELU()
+    if activation == "relu":
+        return nn.ReLU()
     elif activation == "mish":
         return nn.Mish()
     elif activation == "softmax":
