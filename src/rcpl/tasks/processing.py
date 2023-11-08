@@ -1,4 +1,5 @@
 import json
+from functools import partial
 from itertools import chain
 from pathlib import Path
 from typing import Callable
@@ -7,31 +8,37 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from scipy.optimize import fmin
 from taskchain import Parameter, Task, DirData, InMemoryData
 from torch.utils.data import DataLoader, Subset
-from scipy.optimize import fmin
 from torch.utils.data import Dataset
 from torch.utils.tensorboard import SummaryWriter
-import torch.nn.functional as F
 from tqdm import tqdm, trange
 
+from rcpl import metrics, models
 from rcpl.config import RUNS_DIR, REAL_EXPERIMENT
 from rcpl.rcpl import Experiment, rcpl_torch_batch, rcpl_torch_one, random_cyclic_plastic_loading
 from rcpl.reporter import Reporter
 from rcpl.tasks.dataset import TrainDatasetTask, ValDatasetTask, GetRandomPseudoExperimentTask, DatasetInfoTask, \
     UnscaleParamsTorchTask, GetCrlbTask, TestDatasetTask, ScaleParamsTorchTask
 
-from functools import partial
-from rcpl import metrics, models
-
-
 # todo: put this to taskchain somehow
 lower_bound = np.array([15, 100, 0.006666666666666667, 1000, 50, 50, 50, 0.000000001, 0.000000001, 0.000000001, 0.000000001])  # Grid lower bound (number or list of len d)
 upper_bound = np.array([250, 10000, 0.03333333333333333, 10000, 2000, 2000, 2000, 350, 350, 350, 350])
 
 
+def validate(theta):
+    if np.any(theta < lower_bound):
+        return False
+    if np.any(theta > upper_bound):
+        return False
+    return True
+
+
 def to_optimize_one(theta_, stress_, epsp_, kappa_dim, dim) -> float:
-    theta_ = np.clip(theta_, a_min=lower_bound, a_max=upper_bound)
+    if not validate(theta_):
+        return np.inf
     res = random_cyclic_plastic_loading(
         k0=theta_[:1],
         kap=theta_[1:1 + kappa_dim],
@@ -43,17 +50,20 @@ def to_optimize_one(theta_, stress_, epsp_, kappa_dim, dim) -> float:
 
 
 def simplex(unscaled_theta: np.ndarray, stress: np.ndarray, kappa_dim: int, dim: int, epsp: np.ndarray) -> tuple[
-    np.ndarray, list, list]:
+        np.ndarray, list, list]:
     opt_theta = np.zeros_like(unscaled_theta)
     new_values = []
     old_values = []
     for i, (theta_i, stress_i, epsp_i) in enumerate(zip(unscaled_theta, stress, epsp)):
+        if not validate(theta_i):
+            print('BUG - not valid - clipping...', theta_i)
+            theta_i = np.clip(theta_i, lower_bound, upper_bound)
         now_value = to_optimize_one(theta_i, stress_i, epsp_i, kappa_dim, dim)
         # print('Now:', now_value)
         new_theta = fmin(partial(to_optimize_one, stress_=stress_i, epsp_=epsp_i, kappa_dim=kappa_dim, dim=dim),
                          theta_i, disp=0)
 
-        new_theta = np.clip(new_theta, a_min=lower_bound, a_max=upper_bound)
+        assert validate(new_theta)
         opt_theta[i] = new_theta
         new_value = to_optimize_one(opt_theta[i], stress_i, epsp_i, kappa_dim, dim)
         if now_value < new_value:
@@ -67,7 +77,7 @@ def simplex(unscaled_theta: np.ndarray, stress: np.ndarray, kappa_dim: int, dim:
 
 
 def evaluate_model(valid_batch_size, dataset_info, x_metrics, y_metrics, net, val_dataset, device,
-                   num_workers, drop_last, get_random_pseudo_experiment, use_simplex=False, use_tqdm=False,
+                   num_workers, drop_last, get_random_pseudo_experiment, eval_type='raw', use_tqdm=False,
                    tqdm_message=None, unscale_params_torch=None, scale_params_torch=None, prediction_is_scaled=True):
     net.eval()
 
@@ -75,7 +85,7 @@ def evaluate_model(valid_batch_size, dataset_info, x_metrics, y_metrics, net, va
     train_ldr = DataLoader(val_dataset, batch_size=valid_batch_size, shuffle=False, num_workers=num_workers,
                            drop_last=drop_last, pin_memory=True)
 
-    reporter = Reporter(batch_size=valid_batch_size)
+    reporters = [Reporter(batch_size=valid_batch_size), Reporter(batch_size=valid_batch_size)]  # raw, simplex
     loss_func = nn.MSELoss()
     if use_tqdm:
         train_ldr = tqdm(train_ldr, ncols=120, desc=tqdm_message)
@@ -90,47 +100,60 @@ def evaluate_model(valid_batch_size, dataset_info, x_metrics, y_metrics, net, va
                 epsp = epsp[0]  # because *epsp gives a list of one element
 
             y_pred_raw = net(x_true)
-            if use_simplex:
-                if prediction_is_scaled:
-                    unscaled_y_pred = unscale_params_torch(y_pred_raw)
+            for reporter_id, use_simplex in enumerate([False, True]):
+                if use_simplex and eval_type == 'raw':
+                    continue
+                if not use_simplex and eval_type == 'simplex':
+                    continue
+
+                if use_simplex:
+                    if prediction_is_scaled:
+                        unscaled_y_pred = unscale_params_torch(y_pred_raw.clone())
+                    else:
+                        unscaled_y_pred = y_pred_raw.clone()
+
+                    unscaled_y_pred, new_values, old_values = simplex(
+                        unscaled_theta=unscaled_y_pred.cpu().numpy(),
+                        stress=x_true[:, 0, :].cpu().numpy(),
+                        kappa_dim=dataset_info['kappa_dim'],
+                        dim=dataset_info['dim'],
+                        epsp=epsp.cpu().numpy(),
+                    )
+                    unscaled_y_pred = torch.from_numpy(unscaled_y_pred).to(device)
+                    reporters[reporter_id].add_deque('old_x_l2', np.mean(old_values), use_max_len=False, do_print=False)
+                    reporters[reporter_id].add_deque('new_x_l2', np.mean(new_values), use_max_len=False, do_print=False)
+                    y_pred_scaled = scale_params_torch(unscaled_y_pred)
+
                 else:
-                    unscaled_y_pred = y_pred_raw
+                    if prediction_is_scaled:
+                        y_pred_scaled = y_pred_raw.clone()
+                    else:
+                        y_pred_scaled = scale_params_torch(y_pred_raw.clone())
+                reporters[reporter_id].add_deque('Loss/val/_all', loss_func(y_pred_scaled, y_true).item(),
+                                                 use_max_len=False, do_print=False)
+                for metric_name, metric_func in y_metrics.items():
+                    reporters[reporter_id].add_deque(
+                        f'{metric_name}/val', metric_func(y_pred=y_pred_scaled, y_true=y_true), use_max_len=False)
 
-                unscaled_y_pred, new_values, old_values = simplex(
-                    unscaled_theta=unscaled_y_pred.cpu().numpy(),
-                    stress=x_true[:, 0, :].cpu().numpy(),
-                    kappa_dim=dataset_info['kappa_dim'],
-                    dim=dataset_info['dim'],
-                    epsp=epsp.cpu().numpy(),
-                )
-                unscaled_y_pred = torch.from_numpy(unscaled_y_pred).to(device)
-                reporter.add_deque('old_x_l2', np.mean(old_values), use_max_len=False, do_print=False)
-                reporter.add_deque('new_x_l2', np.mean(new_values), use_max_len=False, do_print=False)
-                y_pred_scaled = scale_params_torch(unscaled_y_pred)
+                if param_labels is not None:
+                    for param_value, param_name in zip(torch.mean((y_pred_scaled - y_true) ** 2, dim=0
+                                                                  ).cpu().numpy().tolist(), param_labels):
+                        reporters[reporter_id].add_deque(f'{param_name}/val', param_value, use_max_len=False)
 
-            else:
-                if prediction_is_scaled:
-                    y_pred_scaled = y_pred_raw
-                else:
-                    y_pred_scaled = scale_params_torch(y_pred_raw)
-            reporter.add_deque('Loss/val/_all', loss_func(y_pred_scaled, y_true).item(), use_max_len=False, do_print=False)
-            for metric_name, metric_func in y_metrics.items():
-                reporter.add_deque(f'{metric_name}/val', metric_func(y_pred=y_pred_scaled, y_true=y_true), use_max_len=False)
-
-            if param_labels is not None:
-                for param_value, param_name in zip(torch.mean((y_pred_scaled - y_true) ** 2, dim=0).cpu().numpy().tolist(),
-                                                   param_labels):
-                    reporter.add_deque(f'{param_name}/val', param_value, use_max_len=False)
-
-            for sample_id, (x_i_true, y_i_pred_npy, epsp_i) in enumerate(
-                    zip(x_true.detach().cpu(), y_pred_scaled.detach().cpu().numpy(), epsp.cpu().numpy())):
-                x_i_pred = torch.unsqueeze(torch.from_numpy(
-                    get_random_pseudo_experiment(scaled_params=y_i_pred_npy, experiment=Experiment(epsp_i))[0]), 0)
-                for metric_name, metric_func in x_metrics.items():
-                    reporter.add_deque(f'{metric_name}/val', metric_func(x_pred=x_i_pred[:1], x_true=x_i_true[:1]),
-                                       use_max_len=False, do_print=False)
+                for sample_id, (x_i_true, y_i_pred_npy, epsp_i) in enumerate(
+                        zip(x_true.detach().cpu(), y_pred_scaled.detach().cpu().numpy(), epsp.cpu().numpy())):
+                    x_i_pred = torch.unsqueeze(torch.from_numpy(
+                        get_random_pseudo_experiment(scaled_params=y_i_pred_npy, experiment=Experiment(epsp_i))[0]), 0)
+                    for metric_name, metric_func in x_metrics.items():
+                        reporters[reporter_id].add_deque(f'{metric_name}/val', metric_func(
+                            x_pred=x_i_pred[:1], x_true=x_i_true[:1]), use_max_len=False, do_print=False)
     net.train()
-    return reporter.get_mean_deque()
+    if eval_type == 'raw':
+        return reporters[0].get_mean_deque()
+    elif eval_type == 'simplex':
+        return reporters[1].get_mean_deque()
+    else:
+        return {'raw': reporters[0].get_mean_deque(), 'simplex': reporters[1].get_mean_deque()}
 
 
 class RealExperimentTask(Task):
@@ -245,16 +268,6 @@ class TrainModelTask(Task):
             Parameter("y_metrics", default=None, ignore_persistence=True),
         ]
 
-    def try_decorator(self, func):
-        def wrapper(*args, **kwargs):
-            try:
-                return func(*args, **kwargs)
-            except:
-                print(f'Error in {func.__name__}. Exiting...')
-                return self.get_data_object()
-
-        return wrapper
-
     def run(self, dataset_info: dict, architecture: str, model_parameters: dict, optim: str, optim_kwargs: dict,
             epochs: int, scheduler: str, exec_str: str, save_metrics_n: int, checkpoint_n: int, evaluate_n: int,
             batch_size: int, valid_batch_size: int, shuffle: bool, num_workers: int, drop_last: bool,
@@ -265,8 +278,8 @@ class TrainModelTask(Task):
         data: DirData = self.get_data_object()
         if not is_trainable:
             return data
-        print(
-            f"\n###\n\nTraining model {run_name} with {architecture} architecture\n\nmodel_parameters: {model_parameters}\n\n###\n")
+        print(f"\n###\n\nTraining model {run_name} with {architecture} architecture\n\n"
+              f"model_parameters: {model_parameters}\n\n###\n")
         torch.set_float32_matmul_precision('high')
         param_labels = dataset_info['param_labels']
         x_metrics = get_metrics(x_metrics)
@@ -362,10 +375,18 @@ class TrainModelTask(Task):
                                                     total_batch_id)
 
                         if evaluate_n and total_batch_id % evaluate_n == evaluate_n - 1:
-                            for metric_name, metric_val in evaluate_model(valid_batch_size, dataset_info, x_metrics,
-                                                                          y_metrics, net, val_dataset, device,
-                                                                          num_workers, drop_last,
-                                                                          get_random_pseudo_experiment).items():
+                            for metric_name, metric_val in evaluate_model(
+                                    valid_batch_size=valid_batch_size,
+                                    dataset_info=dataset_info,
+                                    x_metrics=x_metrics,
+                                    y_metrics=y_metrics,
+                                    net=net,
+                                    val_dataset=val_dataset,
+                                    device=device,
+                                    num_workers=num_workers,
+                                    drop_last=drop_last,
+                                    get_random_pseudo_experiment=get_random_pseudo_experiment,
+                                    ).items():
                                 writer.add_scalar(metric_name, metric_val, total_batch_id)
                                 reporter.add_scalar(metric_name, metric_val, total_batch_id)
 
@@ -379,7 +400,8 @@ class TrainModelTask(Task):
                         opt.step()  # update weights
 
                     batch_iterator.set_description(
-                        f'E{epoch_id + 1}/{epochs}, LR: {scheduler.get_last_lr()[-1]: .5f}, Loss: {reporter.get_mean_deque("Loss/train"): .5f}')
+                        f'E{epoch_id + 1}/{epochs}, LR: {scheduler.get_last_lr()[-1]: .5f}, '
+                        f'Loss: {reporter.get_mean_deque("Loss/train"): .5f}')
                     total_batch_id += 1
                     scheduler.step()
 
@@ -569,16 +591,26 @@ class ModelMetricsTask(Task):
         trained_model.eval()
 
         dataset = Subset(test_dataset, indices=range(evaluate_limit)) if evaluate_limit > 0 else test_dataset
-        metric_results = {}
-        for dataset_type, use_simplex in zip(['simplex', 'raw'], [True, False]):
-            metric_results[dataset_type] = {
-                key: float(val) for key, val in
-                evaluate_model(eval_batch_size, dataset_info, x_metrics, y_metrics, trained_model, dataset, device,
-                               num_workers, drop_last, get_random_pseudo_experiment, use_simplex=use_simplex,
-                               use_tqdm=True, tqdm_message=f'{dataset_type}', unscale_params_torch=unscale_params_torch,
-                               scale_params_torch=scale_params_torch,
-                               prediction_is_scaled=prediction_is_scaled).items()}
-            print(f'{dataset_type} metrics: {metric_results[dataset_type]}')
+        metric_results = {
+                key: {key: float(val) for key, val in val_dict.items()} for key, val_dict in
+                evaluate_model(
+                    valid_batch_size=eval_batch_size,
+                    dataset_info=dataset_info,
+                    x_metrics=x_metrics,
+                    y_metrics=y_metrics,
+                    net=trained_model,
+                    val_dataset=dataset,
+                    device=device,
+                    num_workers=num_workers,
+                    drop_last=drop_last,
+                    get_random_pseudo_experiment=get_random_pseudo_experiment,
+                    eval_type='both',
+                    use_tqdm=True,
+                    tqdm_message=f'Raw + Simplex',
+                    unscale_params_torch=unscale_params_torch,
+                    scale_params_torch=scale_params_torch,
+                    prediction_is_scaled=prediction_is_scaled).items()}
+        print(f'metrics: {metric_results}')
         with open(runs_dir / f'model_metrics.json', 'w') as f:
             json.dump(metric_results, f)
         return metric_results
