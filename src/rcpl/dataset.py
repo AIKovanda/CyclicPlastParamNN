@@ -1,7 +1,7 @@
 from torch.utils.data import Dataset
 
 
-class RCLPDataset(Dataset):
+class CPLDataset(Dataset):
     def __init__(self, x, y, epsp=None):
         self.x = x
         self.y = y

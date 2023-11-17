@@ -2,8 +2,6 @@ import numpy as np
 import torch
 from ttopt import TTOpt
 
-from rcpl.rcpl import random_cyclic_plastic_loading
-
 
 class TTOptModel:
     def __init__(self, kappa_dim, dim, rank, ttopt_params=None, epsp=None):

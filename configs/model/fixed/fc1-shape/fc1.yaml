@@ -2,11 +2,11 @@ tasks: rcpl.tasks.processing.*
 uses: "{CONFIGS_DIR}/dataset/2023-08-27.fixed.2_4.standard.yaml"
 
 architecture: FC
-takes_length: 603
+takes_max_length: 603
 takes_epsp: false
 model_parameters:
   inputs: 603
-  layers: [256, 128]
+  layers: [256, 256, 128]
   outputs: 11
   in_channels: 1
   batchnorm: true
@@ -23,7 +23,7 @@ epochs: 10
 scheduler: "torch.optim.lr_scheduler.CosineAnnealingLR(opt, len(train_ldr) * epochs + 1)"
 exec_str: 'nn.utils.clip_grad_value_(net.parameters(), 0.5)'
 save_metrics_n: 100
-evaluate_n: 300
+evaluate_n: 3000000000
 checkpoint_n: 2000
 
 # dataloader_params:

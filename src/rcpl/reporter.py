@@ -5,35 +5,57 @@ import numpy as np
 
 
 class Reporter:
-    def __init__(self, batch_size=None, deque_max_len=100, **meta):
+    def __init__(self, **meta):
         self._stats = {**meta, 'stats': {}}
-        self.deque_stats = {}
-        self.batch_size = batch_size
-        self.deque_max_len = deque_max_len
+        self.mean_sum = {}
+        self.mean_counts = {}
 
-    def get_mean_deque(self, key=None):
+    def get_mean(self, key=None, reset=True):
         if key is None:
-            return {key: np.mean(value) for key, value in self.deque_stats.items()}
-        return np.mean(self.deque_stats[key])
+            res = {key: self.mean_sum[key] / self.mean_counts[key] for key in self.mean_sum.keys()}
+            if reset:
+                self.mean_sum = {}
+                self.mean_counts = {}
+            return res
+        res = self.mean_sum[key] / self.mean_counts[key]
+        if reset:
+            self.mean_sum[key] = 0
+            self.mean_counts[key] = 0
+        return res
 
     def report(self):
-        return ", ".join([f"{key}: {np.mean(value):.4f}" for key, value in self.deque_stats.items()])
+        return ", ".join([f"{key}: {self.get_mean(key):.4f}" for key in self.mean_sum.keys()])
 
     def add_scalar(self, key, value, id_):
+        assert isinstance(value, (int, float))
         if key not in self._stats['stats']:
             self._stats['stats'][key] = {}
         self._stats['stats'][key][id_] = value
 
-    def add_deque(self, key, value, is_batched=True, use_max_len=True, do_print=False):
+    def add_mean(self, key, value, do_print=False):
         if do_print:
             print(key, value)
-        if key not in self.deque_stats:
-            if use_max_len:
-                self.deque_stats[key] = deque(maxlen=self.deque_max_len if is_batched else self.deque_max_len * self.batch_size)
-            else:
-                self.deque_stats[key] = deque()
-        self.deque_stats[key].append(value)
+        if key not in self.mean_sum:
+            self.mean_sum[key] = 0
+            self.mean_counts[key] = 0
+        self.mean_sum[key] += np.mean(value)
+        self.mean_counts[key] += 1
 
     def save(self, path):
         with open(path, 'wb') as f:
             pickle.dump(self._stats, f, pickle.HIGHEST_PROTOCOL)
+
+
+if __name__ == '__main__':
+    reporter = Reporter(batch_size=2, deque_max_len=30)
+    for i in range(1, 7):
+        reporter.add_mean('Loss/val/_all', i)
+    arr = np.zeros(10)
+    for i in range(10):
+        random_arr = np.random.rand(10)
+        arr = arr + random_arr
+        reporter.add_mean('Loss/val/arr', random_arr)
+
+    assert reporter.get_mean('Loss/val/_all') == 3.5
+
+    assert np.allclose(reporter.get_mean('Loss/val/arr'), np.mean(arr) / 10), (reporter.get_mean('Loss/val/arr'), np.mean(arr) / 10)

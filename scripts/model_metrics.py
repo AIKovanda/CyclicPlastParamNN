@@ -17,6 +17,9 @@ conf = Config(
 chain = conf.chain()
 chain.set_log_level('CRITICAL')
 
+_ = chain.train_model.force().value
+# input("Press Enter to continue...")
+
 print("Calculating metrics for ", sys.argv[1])
 _ = chain.model_metrics.force().value
-
+print(_)
