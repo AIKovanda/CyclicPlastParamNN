@@ -1,3 +1,5 @@
+import abc
+import json
 from pathlib import Path
 
 import numpy as np
@@ -7,96 +9,94 @@ from taskchain.parameter import AutoParameterObject
 
 class Experiment(AutoParameterObject):
 
-    def __init__(self, epsp: list | np.ndarray | torch.Tensor | Path, stress: list | np.ndarray | torch.Tensor | Path = None,
-                 representation: tuple = None):
-        self.epsp = epsp
-        self.stress = stress
+    def __init__(self, signal: list | np.ndarray | torch.Tensor | Path = None, channel_labels: list = None,
+                 representation: tuple = None, json_path: Path = None, crop_signal=None, meta: dict = None):
+        self.signal = signal
+        self.channel_labels = channel_labels
+        self.representation = representation
+        self.json_path = json_path
         self.representation = tuple(representation) if representation is not None else ('raw',)
+        self.crop_signal = crop_signal
+        self.meta = meta if meta is not None else {}
 
-        assert epsp is not None
-        epsp = self._load_to_numpy(epsp)
-        assert len(epsp.shape) == 1
-        stress = self._load_to_numpy(stress)
-        if stress is not None:
-            assert len(stress.shape) == 1
+        if self.json_path is not None:
+            self.needs_loading = True
+            self.signal_channel_labels = None
+            self._signal_representation = None
+        else:
+            self.needs_loading = False
+            if not isinstance(signal, torch.Tensor):
+                signal = np.array(signal)
+            if signal.ndim == 1:
+                signal = signal[np.newaxis, :]
+            assert signal.ndim == 2
+            self.signal_channel_labels = channel_labels
+            assert len(self.signal_channel_labels) == signal.shape[0]
+            self._signal_representation = {self.representation: signal}
 
-        self.epsp_representation = {self.representation: epsp}
-        self.stress_representation = {self.representation: stress}
+    @property
+    def signal_representation(self):
+        if self.needs_loading:
+            self._load_json()
+        return self._signal_representation
 
-    def _load_to_numpy(self, data):
-        if isinstance(data, list):
-            return np.array(data)
-        elif isinstance(data, Path):
-            if data.suffix == '.npy':
-                return np.load(data)
-            else:
-                raise NotImplementedError
-        return data
+    def _load_json(self):
+        with open(self.json_path, 'r') as f:
+            data = json.load(f)
+        self._signal_representation = {eval(i): np.array(j) for i, j in data['signal_representation'].items()}
+        self.signal_channel_labels = data['channel_labels']
+        self.meta = data.get('meta', {})
+        self.needs_loading = False
 
-    def get_epsp_representation(self, definition: tuple):
+    def get_signal_representation(self, definition: tuple, channels: list = None):
+        if self.needs_loading:
+            self._load_json()
+        if channels is not None:
+            assert all([channel in self.signal_channel_labels for channel in channels])
+
         if definition[0] == 'raw':
-            return self.epsp_representation[('raw',)]
+            sig = self.signal_representation[('raw',)]
         elif definition[0] == 'geom':
-            return self.geometrically_interpolated_epsp(*definition[1:])
+            sig = self.geometrically_interpolated_signal(*definition[1:])
         elif definition[0] == 'lin':
-            return self.linearly_interpolated_epsp(*definition[1:])
+            sig = self.linearly_interpolated_signal(*definition[1:])
         else:
             raise NotImplementedError
 
-    def get_stress_representation(self, definition: tuple):
-        if definition[0] == 'raw':
-            return self.stress_representation[('raw',)]
-        elif definition[0] == 'geom':
-            return self.geometrically_interpolated_stress(*definition[1:])
-        elif definition[0] == 'lin':
-            return self.linearly_interpolated_stress(*definition[1:])
+        if self.crop_signal is not None:
+            sig = sig[:, self.crop_signal[0]:self.crop_signal[1]]
+        if channels is None:
+            return sig
+        channels_id = [self.signal_channel_labels.index(channel) for channel in channels]
+        can_be_slicer = len(channels_id) == 1 or all([channels_id[i+1]-channels_id[i] == 1 for i in range(len(channels_id)-1)])
+        if can_be_slicer:
+            return sig[channels_id[0]:channels_id[-1]+1]
         else:
-            raise NotImplementedError
+            return sig[channels_id]
 
-    def get_stress_epsp_representation(self, definition: tuple):
-        if definition[0] == 'raw':
-            return np.stack([
-                self.epsp_representation[('raw',)],
-                self.stress_representation[('raw',)],
-            ])
-        elif definition[0] == 'geom':
-            return np.stack([
-                self.geometrically_interpolated_stress(*definition[1:]),
-                self.geometrically_interpolated_epsp(*definition[1:]),
-            ])
-        elif definition[0] == 'lin':
-            return np.stack([
-                self.linearly_interpolated_stress(*definition[1:]),
-                self.linearly_interpolated_epsp(*definition[1:]),
-            ])
-        else:
-            raise NotImplementedError
-
-    def geometrically_interpolated_epsp(self, points_per_segment: int, first_last_ratio: float) -> np.ndarray:
-        if len(self.epsp_representation) > 0:
-            return self.epsp_representation[('geom', points_per_segment, first_last_ratio)]
+    def geometrically_interpolated_signal(self, points_per_segment: int, first_last_ratio: float) -> np.ndarray:
+        if len(self.signal_representation) > 0:
+            return self.signal_representation[('geom', points_per_segment, first_last_ratio)]
         raise NotImplementedError
 
-    def geometrically_interpolated_stress(self, points_per_segment: int, first_last_ratio: float) -> np.ndarray:
-        if len(self.epsp_representation) > 0:
-            return self.stress_representation[('geom', points_per_segment, first_last_ratio)]
-        raise NotImplementedError
-
-    def linearly_interpolated_epsp(self, points_per_segment: int) -> np.ndarray:
-        if points_per_segment in self.epsp_representation:
-            return self.epsp_representation[('lin', points_per_segment)]
-        raise NotImplementedError
-
-    def linearly_interpolated_stress(self, points_per_segment: int) -> np.ndarray:
-        if points_per_segment in self.stress_representation:
-            return self.stress_representation[('lin', points_per_segment)]
+    def linearly_interpolated_signal(self, points_per_segment: int) -> np.ndarray:
+        if points_per_segment in self.signal_representation:
+            return self.signal_representation[('lin', points_per_segment)]
         raise NotImplementedError
 
 
-class RandomExperimentGenerator(AutoParameterObject):
+class RandomExperimentGenerator:
 
-    def __init__(self, epsp_uniform_params: tuple[int, int, int] = None):
+    @abc.abstractmethod
+    def generate_representation(self, definition: tuple):
+        pass
+
+
+class EpsPRandomExperimentGenerator(AutoParameterObject, RandomExperimentGenerator):
+
+    def __init__(self, epsp_uniform_params: tuple[int, int, int] = None, experiment_kwargs: dict = None):
         self.epsp_uniform_params = epsp_uniform_params
+        self.experiment_kwargs = experiment_kwargs if experiment_kwargs is not None else {}
 
     def generate_representation(self, definition: tuple):
         if definition[0] == 'raw':
@@ -123,7 +123,7 @@ class RandomExperimentGenerator(AutoParameterObject):
                 [epsp_r[segment_id + 1] * geo_val + (1 - geo_val) * epsp_r[segment_id] for geo_val in geospace])
         epsp = np.array(epsp)
 
-        return Experiment(epsp, representation=('geom', points_per_segment, first_last_ratio))
+        return Experiment(epsp, channel_labels=['epsp'], representation=('geom', points_per_segment, first_last_ratio), **self.experiment_kwargs)
 
     def generate_by_linearly_interpolated_epsp(self, points_per_segment: int) -> Experiment:
 
@@ -135,4 +135,4 @@ class RandomExperimentGenerator(AutoParameterObject):
             epsp.append(np.linspace(epsp_r[segment_id], epsp_r[segment_id + 1], points_per_segment + 1)[1:])
         epsp = np.concatenate(epsp)
 
-        return Experiment(epsp, representation=('lin', points_per_segment))
+        return Experiment(epsp, channel_labels=['epsp'], representation=('lin', points_per_segment), **self.experiment_kwargs)

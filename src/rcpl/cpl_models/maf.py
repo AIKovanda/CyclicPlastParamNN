@@ -1,5 +1,4 @@
 from abc import ABC
-from functools import cache
 
 import numpy as np
 import torch
@@ -11,44 +10,10 @@ from rcpl.cpl_models import CPLModel, CPLModelFactory
 SQR32 = np.sqrt(1.5)
 
 
-class MAFCPLModelFactory(AutoParameterObject, CPLModelFactory):
-
-    def make_random_theta(self):
-        """
-        Generates random parameters for the MAF model.
-        """
-        dim = self.model_kwargs['dim']
-        kappa_dim = self.model_kwargs['kappa_dim']
-        assert kappa_dim == 2
-
-        a = np.random.uniform(0, 1, size=dim)
-        a /= np.sum(a)
-        a = np.random.uniform(150, 350) * a
-
-        params = [
-            np.random.uniform(*self.params_bound['k0']),  # k0
-            np.random.uniform(*self.params_bound['κ1']),  # kap1
-            1/np.random.uniform(*[1/j for j in self.params_bound['κ2'][::-1]]),  # kap2
-        ]
-        c = []
-        for i in range(dim):
-            c.append(np.exp(np.random.uniform(*[np.log(j) for j in self.params_bound[f'c{i+1}']])))
-
-        return np.concatenate([params, np.sort(c)[::-1], a])
-
-    def make_model(self, theta: np.ndarray = None):
-        model = MAF(
-            theta=theta if theta is not None else self.make_random_theta(),
-            **self.model_kwargs,
-        )
-        assert self.labels == model.labels(latex=False), (self.labels, model.labels(latex=False))
-        return model
-
-
 class MAFModel(CPLModel, ABC):
     model_name = None
 
-    def __init__(self, theta: np.ndarray | torch.Tensor = None, dim=4, kappa_dim=2):
+    def __init__(self, theta: np.ndarray | torch.Tensor, dim=4, kappa_dim=2):
         assert self.model_name in ['MAF', 'MAFTr']
         self.dim = dim
         self.kappa_dim = kappa_dim
@@ -62,9 +27,9 @@ class MAFModel(CPLModel, ABC):
         label_key = 'latex_label' if latex else 'label'
         uses_params = {
             'k0': {'dim': 1, 'label': 'k0', 'latex_label': 'k_0'},
-            'kap': {'dim': self.kappa_dim, 'label': 'κ', 'latex_label': '\\kappa'},
-            'c': {'dim': self.dim, 'label': 'c', 'latex_label': 'c'},
-            'a': {'dim': self.dim, 'label': 'a', 'latex_label': 'a'},
+            'kap': {'dim': self.kappa_dim, 'label': 'κ', 'latex_label': '\\kappa_'},
+            'c': {'dim': self.dim, 'label': 'c', 'latex_label': 'c_'},
+            'a': {'dim': self.dim, 'label': 'a', 'latex_label': 'a_'},
         }
         if self.model_name == 'MAFTr':
             uses_params['aL'] = {'dim': 1, 'label': 'aL', 'latex_label': '\\overline{a}'}
@@ -82,34 +47,93 @@ class MAFModel(CPLModel, ABC):
 class MAF(MAFModel):
     model_name = 'MAF'
 
-    def _predict_stress(self, epsp: np.ndarray) -> np.ndarray:
+    def _predict_stress(self, signal: np.ndarray) -> np.ndarray:
+        assert len(set(signal.shape) - {1}) == 1
         return random_cyclic_plastic_loading(
             k0=self.theta[:1],
             kap=self.theta[1:1 + self.kappa_dim],
             c=self.theta[1 + self.kappa_dim:1 + self.kappa_dim + self.dim],
             a=self.theta[1 + self.kappa_dim + self.dim:],
-            epsp=epsp,
+            epsp=signal.flatten(),
         )
 
-    def _predict_stress_torch(self, epsp: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
+    def _predict_stress_torch(self, signal: torch.Tensor) -> torch.Tensor:
+        assert len(set(signal.shape) - {1}) == 1
         return random_cyclic_plastic_loading_torch_batch(
-            epsp=torch.unsqueeze(epsp, 0),
+            epsp=torch.unsqueeze(signal, 0),
             k0=torch.unsqueeze(self.theta[:1], 0),
             kap=torch.unsqueeze(self.theta[1:1 + self.kappa_dim], 0),
             c=torch.unsqueeze(self.theta[1 + self.kappa_dim:1 + self.kappa_dim + self.dim], 0),
             a=torch.unsqueeze(self.theta[1 + self.kappa_dim + self.dim:], 0),
         )[0]
 
-    def _predict_stress_torch_batch(self, epsp: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
+    def _predict_stress_torch_batch(self, signal: torch.Tensor) -> torch.Tensor:
+        assert signal.ndim == 3
+        assert signal.shape[1] == 1
         return random_cyclic_plastic_loading_torch_batch(
-            epsp=epsp,
+            epsp=signal[:, 0, :],
             k0=self.theta[:, :1],
             kap=self.theta[:, 1:1 + self.kappa_dim],
             c=self.theta[:, 1 + self.kappa_dim:1 + self.kappa_dim + self.dim],
             a=self.theta[:, 1 + self.kappa_dim + self.dim:],
         )
+
+
+class MAFCPLModelFactory(AutoParameterObject, CPLModelFactory):
+    sort_first = 4
+    model_class = MAF
+
+    def make_random_theta(self):
+        """
+        Generates random parameters for the MAF model.
+        """
+        dim = self.model_kwargs['dim']
+        kappa_dim = self.model_kwargs['kappa_dim']
+        log_shift = self.apriori_distribution_params.get('log_shift', 0)
+        assert kappa_dim % 2 == 0
+
+        a_sum = np.random.uniform(*self.apriori_distribution_params['a_sum_bound'])
+        a_lower_bound = np.array([self.params_bound[f'a{i+1}'][0] for i in range(dim)])
+        a_upper_bound = np.array([self.params_bound[f'a{i+1}'][1] for i in range(dim)])
+        assert np.all(0 < a_lower_bound) and np.all(a_lower_bound < a_upper_bound)
+        a = np.random.uniform(0, 1, size=dim)
+        a /= np.sum(a)
+        a = a_sum * a
+        while np.any(a < a_lower_bound) or np.any(a > a_upper_bound):
+            a = np.random.uniform(0, 1, size=dim)
+            a /= np.sum(a)
+            a = a_sum * a
+
+        if 'aL' in self.params_bound:
+            aL = [[np.random.uniform(*self.params_bound['aL'])]]
+        else:
+            aL = []
+
+        params = [np.random.uniform(*self.params_bound['k0'])]  # k0
+        for i in range(kappa_dim):
+            if i % 2 == 0:
+                params.append(np.random.uniform(*self.params_bound[f'κ{i+1}']))  # kap1, kap3,...
+            else:
+                params.append(1/np.random.uniform(*[1/j for j in self.params_bound[f'κ{i+1}'][::-1]]))  # kap2, kap4, ...
+
+        c = []
+        for i in range(dim):
+            c.append(np.exp(np.random.uniform(*[np.log(j+log_shift) for j in self.params_bound[f'c{i+1}']]))-log_shift)
+        c = np.array(c)
+        if (l := self.apriori_distribution_params.get('scale_c', 0)) > 0:
+            c *= np.log(1 + (a-a_lower_bound) * l) / np.log(1 + (a_upper_bound - a_lower_bound) * l)
+
+        sorted_ids = np.argsort(c[:self.sort_first])[::-1]
+
+        return np.concatenate([params, c[sorted_ids], c[self.sort_first:], a[sorted_ids], a[self.sort_first:], *aL])
+
+    def make_model(self, theta: np.ndarray | torch.Tensor = None):
+        model = self.model_class(
+            theta=theta if theta is not None else self.make_random_theta(),
+            **self.model_kwargs,
+        )
+        assert self.labels == model.labels(latex=False), (self.labels, model.labels(latex=False))
+        return model
 
 
 def random_cyclic_plastic_loading(k0: np.ndarray, kap: np.ndarray, a: np.ndarray, c: np.ndarray, epsp: np.ndarray):
@@ -179,17 +203,44 @@ def random_cyclic_plastic_loading_engine_torch(k0: torch.Tensor, kap: torch.Tens
     alp = torch.zeros((*a.shape, epsp.shape[-1]), dtype=kap.dtype, device=epsp.device)
     alp_ref = torch.zeros(*a.shape, dtype=kap.dtype, device=epsp.device)
     epsp_ref = epsp[:, :1]
-    k = 0
-    for i in range(epsp.shape[-1]):
-        depsp = torch.abs(epsp[:, i: i + 1] - epsp_ref)
-        alp[..., i] = directors[i] * a - (directors[i] * a - alp_ref) * torch.exp(-c * depsp)
-        if i == reversal_ids[k]:  # Use .item() to extract the value from the tensor
-            alp_ref = alp[..., i]
-            epsp_ref = epsp[:, i: i + 1]
-            k += 1
+    last_unprocessed = 0
+    for r in reversal_ids:
+        if r == -1:
+            r = epsp.shape[-1] - 1  # -1 gives the last item's index
+            if last_unprocessed >= r:
+                break
+        depsp = torch.abs(epsp[:, last_unprocessed: r+1] - epsp_ref)
+        da = a.unsqueeze(-1) * directors[last_unprocessed: r+1].view(1, 1, -1)
+        alp[..., last_unprocessed: r+1] = da - (da - alp_ref.unsqueeze(-1)) * torch.exp(-c.unsqueeze(-1) * depsp.unsqueeze(1))
+
+        alp_ref = alp[..., r]
+        epsp_ref = epsp[:, r: r + 1]
+        last_unprocessed = r + 1
 
     sig = SQR32 * torch.sum(alp, dim=1) + kiso
     return sig
+
+
+
+# def random_cyclic_plastic_loading_engine_torch(k0: torch.Tensor, kap: torch.Tensor, a: torch.Tensor, c: torch.Tensor,
+#                                                epsp: torch.Tensor, epspc: torch.Tensor,
+#                                                directors: torch.Tensor, reversal_ids: torch.Tensor):
+#     kiso = directors.repeat(kap.shape[0], 1) / kap[:, 1:2] * (
+#                 1 - (1 - k0 * kap[:, 1:2]) * torch.exp(-SQR32 * kap[:, 0:1] * kap[:, 1:2] * epspc))
+#     alp = torch.zeros((*a.shape, epsp.shape[-1]), dtype=kap.dtype, device=epsp.device)
+#     alp_ref = torch.zeros(*a.shape, dtype=kap.dtype, device=epsp.device)
+#     epsp_ref = epsp[:, :1]
+#     k = 0
+#     for i in range(epsp.shape[-1]):
+#         depsp = torch.abs(epsp[:, i: i + 1] - epsp_ref)
+#         alp[..., i] = directors[i] * a - (directors[i] * a - alp_ref) * torch.exp(-c * depsp)
+#         if i == reversal_ids[k]:  # Use .item() to extract the value from the tensor
+#             alp_ref = alp[..., i]
+#             epsp_ref = epsp[:, i: i + 1]
+#             k += 1
+#
+#     sig = SQR32 * torch.sum(alp, dim=1) + kiso
+#     return sig
 
 
 #

@@ -12,7 +12,7 @@ from rcpl.rcpl import Experiment
 
 DEVICE = 'cuda'
 
-config_path = config.CONFIGS_DIR / 'model' / sys.argv[1]
+config_path = config.CONFIGS_DIR / 'maf' / sys.argv[1]
 
 conf = Config(
     config.TASKS_DIR,  # where Taskchain data should be stored

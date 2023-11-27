@@ -7,6 +7,7 @@ from taskchain import InMemoryData, Parameter, ModuleTask, DirData
 from torch.utils.data import Dataset
 from tqdm import trange
 
+from rcpl.config import BASE_DIR
 from rcpl.dataset import CPLDataset
 from rcpl.experiment import Experiment, RandomExperimentGenerator
 from rcpl.cpl_models import CPLModelFactory
@@ -21,16 +22,17 @@ class DatasetInfoTask(ModuleTask):
             Parameter("exp_representation"),
             Parameter("model_factory"),
             Parameter("split"),
+            Parameter("cpl_model_channels"),
             Parameter("n_samples_for_stats"),
         ]
 
     def run(self, experiment, exp_generator: RandomExperimentGenerator, exp_representation,
-            model_factory: CPLModelFactory, split, n_samples_for_stats) -> dict:
+            model_factory: CPLModelFactory, split, cpl_model_channels: list, n_samples_for_stats) -> dict:
 
         if experiment is None:
             experiment = exp_generator.generate_representation(exp_representation)
 
-        x = np.zeros((n_samples_for_stats, len(experiment.get_epsp_representation(exp_representation))), dtype=np.float32)
+        x = np.zeros((n_samples_for_stats, experiment.get_signal_representation(exp_representation, channels=cpl_model_channels).shape[-1]), dtype=np.float32)
         random_num_model = model_factory.make_model()
         y = np.zeros((n_samples_for_stats, random_num_model.theta_len), dtype=np.float64)
         for i in trange(n_samples_for_stats, desc='Generating random parameters'):
@@ -38,7 +40,7 @@ class DatasetInfoTask(ModuleTask):
                 experiment = exp_generator.generate_representation(exp_representation)
 
             num_model = model_factory.make_model()
-            x[i] = num_model.predict_stress(experiment.get_epsp_representation(exp_representation))
+            x[i] = num_model.predict_stress(experiment.get_signal_representation(exp_representation, channels=cpl_model_channels))
             y[i] = num_model.theta
 
         return {
@@ -83,19 +85,22 @@ class DatasetDirTask(ModuleTask):
             Parameter("exp_representation"),
             Parameter("model_factory"),
             Parameter("split"),
+            Parameter("cpl_model_channels"),
+            Parameter("x_channels"),
         ]
 
-    def run(self, experiment, exp_generator: RandomExperimentGenerator, exp_representation,
-            model_factory: CPLModelFactory, split: tuple) -> DirData:
+    def run(self, experiment: Experiment, exp_generator: RandomExperimentGenerator, exp_representation,
+            model_factory: CPLModelFactory, split: tuple, cpl_model_channels: list, x_channels: list) -> DirData:
         assert (experiment is not None) ^ (exp_generator is not None)
+        assert x_channels[0] == 'stress', 'Stress channel must be included in x_channels'
+        assert len(x_channels) == len(set(x_channels)), 'x_channels must be unique'
         data: DirData = self.get_data_object()
         dataset_dir = data.dir
 
-        generate_epsp = experiment is None
         if experiment is None:
             experiment = exp_generator.generate_representation(exp_representation)
 
-        x = np.zeros((split[-1], (2 if generate_epsp else 1), len(experiment.get_epsp_representation(exp_representation))), dtype=np.float32)
+        x = np.zeros((split[-1], len(x_channels), experiment.get_signal_representation(exp_representation, channels=cpl_model_channels).shape[-1]), dtype=np.float32)
         random_num_model = model_factory.make_model()
         y = np.zeros((split[-1], random_num_model.theta_len), dtype=np.float64)
 
@@ -104,12 +109,12 @@ class DatasetDirTask(ModuleTask):
                 experiment = exp_generator.generate_representation(exp_representation)
 
             num_model = model_factory.make_model()
-            epsp = experiment.get_epsp_representation(exp_representation)
-            stress = num_model.predict_stress(epsp)
-            assert len(epsp) == len(stress)
+            signal = experiment.get_signal_representation(exp_representation, channels=cpl_model_channels)
+            stress = num_model.predict_stress(signal)
+            assert signal.shape[-1] == stress.shape[-1]
             x[i, 0] = stress
-            if generate_epsp:
-                x[i, 1] = epsp
+            if len(x_channels) > 1:
+                x[i, 1:] = experiment.get_signal_representation(exp_representation, channels=x_channels[1:])
             y[i] = num_model.theta
 
         for i, name in enumerate(['train', 'val', 'test']):
@@ -117,6 +122,46 @@ class DatasetDirTask(ModuleTask):
             np.save(str(dataset_dir / f'{name}_y.npy'), y[split[i]:split[i + 1], :])
 
         return data
+
+
+class ThetaHistogramTask(ModuleTask):
+    class Meta:
+        data_class = InMemoryData
+        input_tasks = [
+            DatasetInfoTask,
+            DatasetDirTask
+        ]
+        parameters = [
+        ]
+
+    def run(self, dataset_info: dict, dataset_dir: Path) -> list[Callable]:
+        latex_labels = dataset_info['latex_labels']
+        labels = dataset_info['labels']
+        train_y = np.load(str(dataset_dir / 'train_y.npy'))  # (N, P)
+
+        def hist(bins=20, figsize=(16, 5)):
+            import matplotlib.pyplot as plt
+            for i in range(train_y.shape[1]):
+                plt.figure(figsize=figsize)
+                plt.title(f'${latex_labels[i]}$')
+                plt.hist(train_y[:, i], bins=bins)
+                plt.xlabel(f'${latex_labels[i]}$')
+                plt.ylabel('Count')
+                plt.savefig(str(BASE_DIR / 'notebooks' / 'hist' / f'hist_{labels[i]}.png'))
+                plt.show()
+
+        def hist2d(figsize=(16, 5)):
+            import matplotlib.pyplot as plt
+            import seaborn as sns
+            for i in range(train_y.shape[1]-1):
+                for j in range(i + 1, train_y.shape[1]):
+                    sns.jointplot(x=train_y[:, i], y=train_y[:, j], kind='hist')
+                    plt.xlabel(f'${latex_labels[i]}$')
+                    plt.ylabel(f'${latex_labels[j]}$')
+                    plt.savefig(str(BASE_DIR / 'notebooks' / 'hist' / f'hist2d_{labels[i]}_{labels[j]}.png'))
+                    plt.show()
+
+        return [hist, hist2d]
 
 
 class UnscaleThetaTask(ModuleTask):
@@ -205,10 +250,10 @@ class GetRandomPseudoExperimentTask(ModuleTask):
         ]
 
     def run(self, unscale_theta: callable, model_factory: CPLModelFactory) -> Callable:
-        def get_random_pseudo_experiment_(scaled_theta, epsp_correct_representation: np.ndarray):
+        def get_random_pseudo_experiment_(scaled_theta, signal_correct_representation: np.ndarray):
             theta = unscale_theta(scaled_theta)
             num_model = model_factory.make_model(theta)
-            return num_model.predict_stress(epsp_correct_representation)
+            return num_model.predict_stress(signal_correct_representation)
         return get_random_pseudo_experiment_
 
 
@@ -236,7 +281,7 @@ class AbstractDatasetTask(ModuleTask):
             else:
                 raise ValueError(f"Unknown scale_type: {scale_type}")
 
-        return CPLDataset(x=x, y=y.float(), epsp=(experiment.get_epsp_representation(exp_representation)
+        return CPLDataset(x=x, y=y.float(), signal=(experiment.get_signal_representation(exp_representation, channels=self.params['cpl_model_channels'])
                                                   if experiment is not None else None))
 
 
@@ -247,6 +292,7 @@ class TrainDatasetTask(AbstractDatasetTask):
         parameters = [
             Parameter("experiment", default=None),
             Parameter("exp_representation"),
+            Parameter("cpl_model_channels"),
             Parameter("scale_type", default=None),
         ]
         split_name = 'train'
@@ -259,6 +305,7 @@ class ValDatasetTask(AbstractDatasetTask):
         parameters = [
             Parameter("experiment", default=None),
             Parameter("exp_representation"),
+            Parameter("cpl_model_channels"),
             Parameter("scale_type", default=None),
         ]
         split_name = 'val'
@@ -271,6 +318,7 @@ class TestDatasetTask(AbstractDatasetTask):
         parameters = [
             Parameter("experiment", default=None),
             Parameter("exp_representation"),
+            Parameter("cpl_model_channels"),
             Parameter("scale_type", default=None),
         ]
         split_name = 'test'
@@ -286,6 +334,7 @@ class GetCrlbTask(ModuleTask):
         ]
 
     def run(self, model_factory: CPLModelFactory, scale_type: str | None) -> Callable:
+        raise NotImplementedError
 
         def get_crlb_(epsp, unscaled_theta):
             assert epsp is not None

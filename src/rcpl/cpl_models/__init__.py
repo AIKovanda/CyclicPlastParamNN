@@ -8,9 +8,9 @@ class CPLModel:
 
     def __init__(self, theta: np.ndarray | torch.Tensor = None):
         assert theta is not None
-        assert theta.ndim == 1
+        assert theta.ndim <= 2  # can be batched
         self.theta = theta
-        assert len(theta) == self.theta_len
+        assert theta.shape[-1] == self.theta_len, f'Expected theta of shape (..., {self.theta_len}), got {theta.shape}'
         self._labels = {}
 
     def labels(self, latex=False) -> list[str]:  # @cache wasted a lot of memory - this is a workaround
@@ -31,38 +31,42 @@ class CPLModel:
     def theta_len(self) -> int:
         pass
 
-    def predict_stress(self, epsp: np.ndarray) -> np.ndarray:
-        assert isinstance(epsp, np.ndarray)
+    def predict_stress(self, signal: np.ndarray) -> np.ndarray:
+        assert isinstance(signal, np.ndarray)
         assert isinstance(self.theta, np.ndarray)
-        return self._predict_stress(epsp=epsp)
+        assert signal.ndim == 2
+        return self._predict_stress(signal=signal)
 
     @abc.abstractmethod
-    def _predict_stress(self, epsp: np.ndarray) -> np.ndarray:
+    def _predict_stress(self, signal: np.ndarray) -> np.ndarray:
         pass
 
-    def predict_stress_torch(self, epsp: torch.Tensor) -> torch.Tensor:
-        assert isinstance(epsp, torch.Tensor)
+    def predict_stress_torch(self, signal: torch.Tensor) -> torch.Tensor:
+        assert isinstance(signal, torch.Tensor)
         assert isinstance(self.theta, torch.Tensor)
-        return self._predict_stress_torch(epsp=epsp)
+        assert signal.ndim == 2
+        return self._predict_stress_torch(signal=signal)
 
     @abc.abstractmethod
-    def _predict_stress_torch(self, epsp: torch.Tensor) -> torch.Tensor:
+    def _predict_stress_torch(self, signal: torch.Tensor) -> torch.Tensor:
         pass
 
-    def predict_stress_torch_batch(self, epsp: torch.Tensor) -> torch.Tensor:
-        assert isinstance(epsp, torch.Tensor)
+    def predict_stress_torch_batch(self, signal: torch.Tensor) -> torch.Tensor:
+        assert isinstance(signal, torch.Tensor)
         assert isinstance(self.theta, torch.Tensor)
-        return self._predict_stress_torch_batch(epsp=epsp)
+        assert signal.ndim == 3
+        return self._predict_stress_torch_batch(signal=signal)
 
     @abc.abstractmethod
-    def _predict_stress_torch_batch(self, epsp: torch.Tensor) -> torch.Tensor:
+    def _predict_stress_torch_batch(self, signal: torch.Tensor) -> torch.Tensor:
         pass
 
 
 class CPLModelFactory:
-    def __init__(self, params_bound: dict, model_kwargs: dict = None):
+    def __init__(self, params_bound: dict, model_kwargs: dict = None, apriori_distribution_params: dict = None):
         self.params_bound = params_bound
         self.model_kwargs = model_kwargs if model_kwargs is not None else {}
+        self.apriori_distribution_params = apriori_distribution_params if apriori_distribution_params is not None else {}
 
     @property
     def lower_bound(self) -> np.ndarray:

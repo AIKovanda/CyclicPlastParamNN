@@ -1,23 +1,26 @@
 import numpy as np
 import torch
+from taskchain.parameter import AutoParameterObject
 from torch import nn
 
 from rcpl.models.inceptiontime import InceptionBlock
 from rcpl.models.tools import get_activation
 
 
-class GRU(nn.Module):
+class GRU(AutoParameterObject, nn.Module):
     def __init__(self, in_channels, hidden_size, layers, outputs, rnn_kwargs=None, batchnorm=True, first_last=False,
                  fc_layers: list[int] = None, segments_num=None):
         super().__init__()
+        self.in_channels = in_channels
         self.hidden_size = hidden_size
         self.layers = layers
+        self.outputs = outputs
+        self.rnn_kwargs = rnn_kwargs if rnn_kwargs is not None else {}
         self.batchnorm = batchnorm
-        self.segments_num = segments_num
         self.first_last = first_last
-        if rnn_kwargs is None:
-            rnn_kwargs = {}
-        self.rnn = nn.GRU(in_channels, hidden_size, layers, batch_first=True, **rnn_kwargs)
+        self.fc_layers = fc_layers
+        self.segments_num = segments_num
+        self.rnn = nn.GRU(in_channels, hidden_size, layers, batch_first=True, **self.rnn_kwargs)
 
         self.bn_layer = nn.BatchNorm1d(in_channels)
         # -> x needs to be: (batch_size, seq, input_size)
@@ -25,9 +28,9 @@ class GRU(nn.Module):
         # or:
         # self.gru1-shape = nn.GRU(input_size, hidden_size, num_layers, batch_first=True)
         # self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        fc_sizes = [hidden_size * (2 if rnn_kwargs.get('bidirectional', False) else 1) * (segments_num+1 if segments_num is not None else (2 if first_last else 1))]
-        if fc_layers is not None:
-            fc_sizes.extend(fc_layers)
+        fc_sizes = [hidden_size * (2 if self.rnn_kwargs.get('bidirectional', False) else 1) * (segments_num+1 if segments_num is not None else (2 if first_last else 1))]
+        if self.fc_layers is not None:
+            fc_sizes.extend(self.fc_layers)
         fc_sizes.append(outputs)
         self.fcs = nn.ModuleList([nn.Linear(fc_sizes[i], fc_sizes[i + 1]) for i in range(len(fc_sizes) - 1)])
 

@@ -3,6 +3,7 @@ import torch
 
 
 def x_l2(x_pred: torch.Tensor, x_true: torch.Tensor, **kwargs) -> float:
+
     return float(torch.mean((x_pred - x_true)**2))
 
 
