@@ -3,11 +3,20 @@ tasks: rcpl.tasks.dataset.*
 exp_generator:
   class: rcpl.experiment.EpsPRandomExperimentGenerator
   kwargs:
-    epsp_uniform_params: [0.003, 0.005, 43]
+    dist_type: beta
+    epsp_dist_config:
+      num_reversals: 43
+      alpha: 2
+      beta: 6
+      return_same_chance: 0.2
+      min_step: 0.0002
+      bound: 0.007
     experiment_kwargs:
       crop_signal: [0, 681]
 
 exp_representation: ['geom', 17, 20]
+cpl_model_channels: ['epsp']
+x_channels: ['stress', 'epsp']
 
 model_factory:
     class: rcpl.cpl_models.maftr.MAFTrCPLModelFactory
@@ -25,10 +34,12 @@ model_factory:
         a3: [0.000000001, 200]
         a4: [0.000000001, 200]
         aL: [0, 500]
-      a_sum_bound: [0, 200]
+      apriori_distribution_params:
+        a_sum_bound: [100, 400]
       model_kwargs:
         dim: 4
         kappa_dim: 2
+        uses_log_c: false
 
 split: [0, 1000000, 1020000, 1120000]
 n_samples_for_stats: 1000000

@@ -34,7 +34,7 @@ class CPLModel:
     def predict_stress(self, signal: np.ndarray) -> np.ndarray:
         assert isinstance(signal, np.ndarray)
         assert isinstance(self.theta, np.ndarray)
-        assert signal.ndim == 2
+        assert signal.ndim == 2, f'Expected signal of shape (C, L), got {signal.shape}'
         return self._predict_stress(signal=signal)
 
     @abc.abstractmethod
@@ -73,8 +73,16 @@ class CPLModelFactory:
         return np.array([v[0] for v in self.params_bound.values()])
 
     @property
+    def simplex_lower_bound(self) -> np.ndarray:
+        return np.array([1e-5 for v in self.params_bound.values()])
+
+    @property
     def upper_bound(self) -> np.ndarray:
         return np.array([v[1] for v in self.params_bound.values()])
+
+    @property
+    def simplex_upper_bound(self) -> np.ndarray:
+        return np.array([np.inf for v in self.params_bound.values()])
 
     @property
     def labels(self) -> list[str]:

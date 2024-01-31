@@ -48,9 +48,6 @@ other_training_params:
     drop_last: true
     pin_memory: true
 
-  run_dir: "maftr-2023-11-23-d1.6_4"
-  run_name: "fc1-1"
-
   save_metrics_n: 100
   evaluate_n: 1000
 
@@ -61,3 +58,5 @@ other_training_params:
 
     y_metrics:
       y_l2: 'y_l2'
+
+eval_on_experiments: [ '2023-11-23' ]

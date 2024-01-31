@@ -5,14 +5,10 @@ import pytest
 import torch
 import yaml
 
-from rcpl.config import DATA_DIR
+from rcpl.config import DATA_DIR, MEASURED_EXP_DIR, GENERATED_EXP_DIR
 from rcpl.cpl_models.maf import MAFCPLModelFactory
 from rcpl.cpl_models.maftr import MAFTr, MAFTrCPLModelFactory
 from rcpl.experiment import Experiment
-
-GENERATED_DIR = DATA_DIR / 'epsp_stress' / 'generated'
-MEASURED_DIR = DATA_DIR / 'epsp_stress' / 'measured'
-
 
 FACTORIES = {
     'maftr_factory': MAFTrCPLModelFactory(**yaml.unsafe_load('''
@@ -91,32 +87,9 @@ FACTORIES = {
 }
 
 
-@pytest.mark.parametrize("fac_name,fac", FACTORIES.items())
-def test_torch(fac_name, fac):
-    m_exp = Experiment(json_path=DATA_DIR / 'epsp_stress' / 'measured' / '2023-11-23.json')
-    m_epsp = m_exp.get_signal_representation(('geom', 17, 20), ['epsp'])
-
-    for i in range(1000):
-        batch_size = 1#(i % 64) + 1
-        theta_batch = [fac.make_random_theta() for _ in range(batch_size)]
-        epsp_batch = [m_epsp + np.random.rand(np.prod(m_epsp.shape)) / 100000 for _ in range(batch_size)]
-
-        np_stress = [fac.make_model(theta).predict_stress(epsp) for theta, epsp in zip(theta_batch, epsp_batch)]
-
-        torch_model = fac.make_model(torch.from_numpy(np.stack(theta_batch)))
-        torch_stress = torch_model.predict_stress_torch_batch(torch.from_numpy(np.stack(epsp_batch)))
-
-        if np.mean(np.abs(np.array(np_stress) - torch_stress.detach().numpy())) > 0.05:
-            np.save('np_stress.npy', np.array(np_stress))
-            np.save('torch_stress.npy', torch_stress.detach().numpy())
-            np.save('epsp_batch.npy', np.stack(epsp_batch))
-            np.save('theta_batch.npy', np.stack(theta_batch))
-        assert np.mean(np.abs(np.array(np_stress) - torch_stress.detach().numpy())) < 0.05, (i, np.mean(np.abs(np.array(np_stress) - torch_stress.detach().numpy())))
-
-
-@pytest.mark.parametrize("exp_path", list(GENERATED_DIR.glob('*maftr*.json')))
+@pytest.mark.parametrize("exp_path", list(GENERATED_EXP_DIR.glob('*maftr*.json')))
 def test_maftr_model(exp_path):
-    measured_experiment_path = MEASURED_DIR / re.sub(r'\.maftr(\d+)', '', exp_path.name)
+    measured_experiment_path = MEASURED_EXP_DIR / re.sub(r'\.maftr(\d+)', '', exp_path.name)
     m_exp = Experiment(json_path=measured_experiment_path)
     m_exp._load_json()
     exp = Experiment(json_path=exp_path)
@@ -127,3 +100,28 @@ def test_maftr_model(exp_path):
 
     mean_abs_dif = np.mean(np.abs(stress - exp.get_signal_representation(exp.meta['representation'], ['stress'])))
     assert mean_abs_dif < 0.05, f'Mean absolute difference is {mean_abs_dif} for {exp_path.name}'
+
+
+@pytest.mark.parametrize("fac_name,fac", FACTORIES.items())
+def test_torch(fac_name, fac):
+    m_exp = Experiment(json_path=DATA_DIR / 'epsp_stress' / 'measured' / '2023-11-23.json')
+    m_epsp = m_exp.get_signal_representation(('geom', 17, 20), ['epsp'])
+
+    for i in range(100):
+        batch_size = (i % 64) + 1
+        theta_batch = [fac.make_random_theta() for _ in range(batch_size)]
+        epsp_batch = [m_epsp for _ in range(batch_size)]  #  + np.random.rand(np.prod(m_epsp.shape)
+
+        np_stress = [fac.make_model(theta).predict_stress(epsp) for theta, epsp in zip(theta_batch, epsp_batch)]
+
+        theta_t = torch.from_numpy(np.stack(theta_batch))
+        if (i+1) % 25 == 0:
+            theta_t.requires_grad = True
+        torch_model = fac.make_model(theta_t)
+        torch_stress = torch_model.predict_stress_torch_batch(torch.from_numpy(np.stack(epsp_batch)))
+
+        if (i+1) % 25 == 0:
+            torch_stress.sum().backward()
+            assert theta_t.grad.sum() != 0
+
+        assert np.allclose(np.array(np_stress), torch_stress.detach().numpy()), (i, np.mean(np.abs(np.array(np_stress) - torch_stress.detach().numpy())))

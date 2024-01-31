@@ -28,8 +28,8 @@ model_factory:
         aL: [ 0, 500 ]
       apriori_distribution_params:
         a_sum_bound: [100, 400]
-        log_shift: 100
-        scale_c: 1
+#        log_shift: 100
+#        scale_c: 1
       model_kwargs:
         dim: 4
         kappa_dim: 2

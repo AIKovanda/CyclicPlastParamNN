@@ -50,9 +50,6 @@ other_training_params:
     drop_last: true
     pin_memory: true
 
-  run_dir: "maftr-2023-08-27-d1.2_4"
-  run_name: "fc1-2"
-
   save_metrics_n: 100
   evaluate_n: 1000
 
@@ -64,8 +61,11 @@ other_training_params:
     y_metrics:
       y_l2: 'y_l2'
 
+eval_on_experiments: [ '2023-11-23' ]
+
 
 loss_func: 'stress_MSELoss'
 loss_func_kwargs:
   y_ratio: 0.5
   x_grad_scale: 30.  # empirically similar
+  y_crop: -1

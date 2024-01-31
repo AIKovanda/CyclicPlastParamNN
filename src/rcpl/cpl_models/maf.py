@@ -13,10 +13,11 @@ SQR32 = np.sqrt(1.5)
 class MAFModel(CPLModel, ABC):
     model_name = None
 
-    def __init__(self, theta: np.ndarray | torch.Tensor, dim=4, kappa_dim=2):
+    def __init__(self, theta: np.ndarray | torch.Tensor, dim=4, kappa_dim=2, uses_log_c=False):
         assert self.model_name in ['MAF', 'MAFTr']
         self.dim = dim
         self.kappa_dim = kappa_dim
+        self.uses_log_c = uses_log_c
         super().__init__(theta=theta)
 
     @property
@@ -28,14 +29,14 @@ class MAFModel(CPLModel, ABC):
         uses_params = {
             'k0': {'dim': 1, 'label': 'k0', 'latex_label': 'k_0'},
             'kap': {'dim': self.kappa_dim, 'label': 'κ', 'latex_label': '\\kappa_'},
-            'c': {'dim': self.dim, 'label': 'c', 'latex_label': 'c_'},
+            'c': {'dim': self.dim, 'label': 'log_c' if self.uses_log_c else 'c', 'latex_label': r'\log c_' if self.uses_log_c else 'c_'},
             'a': {'dim': self.dim, 'label': 'a', 'latex_label': 'a_'},
         }
         if self.model_name == 'MAFTr':
             uses_params['aL'] = {'dim': 1, 'label': 'aL', 'latex_label': '\\overline{a}'}
 
         labels = []
-        for param_name, param_info in uses_params.items():
+        for param_info in uses_params.values():
             if param_info['dim'] == 1:
                 labels.append(param_info[label_key])
             else:
@@ -49,32 +50,41 @@ class MAF(MAFModel):
 
     def _predict_stress(self, signal: np.ndarray) -> np.ndarray:
         assert len(set(signal.shape) - {1}) == 1
+        c = self.theta[1 + self.kappa_dim:1 + self.kappa_dim + self.dim]
+        if self.uses_log_c:
+            c = np.exp(c)
         return random_cyclic_plastic_loading(
             k0=self.theta[:1],
             kap=self.theta[1:1 + self.kappa_dim],
-            c=self.theta[1 + self.kappa_dim:1 + self.kappa_dim + self.dim],
+            c=c,
             a=self.theta[1 + self.kappa_dim + self.dim:],
             epsp=signal.flatten(),
         )
 
     def _predict_stress_torch(self, signal: torch.Tensor) -> torch.Tensor:
         assert len(set(signal.shape) - {1}) == 1
+        c = torch.unsqueeze(self.theta[1 + self.kappa_dim:1 + self.kappa_dim + self.dim], 0)
+        if self.uses_log_c:
+            c = torch.exp(c)
         return random_cyclic_plastic_loading_torch_batch(
             epsp=torch.unsqueeze(signal, 0),
             k0=torch.unsqueeze(self.theta[:1], 0),
             kap=torch.unsqueeze(self.theta[1:1 + self.kappa_dim], 0),
-            c=torch.unsqueeze(self.theta[1 + self.kappa_dim:1 + self.kappa_dim + self.dim], 0),
+            c=c,
             a=torch.unsqueeze(self.theta[1 + self.kappa_dim + self.dim:], 0),
         )[0]
 
     def _predict_stress_torch_batch(self, signal: torch.Tensor) -> torch.Tensor:
         assert signal.ndim == 3
         assert signal.shape[1] == 1
+        c = self.theta[:, 1 + self.kappa_dim:1 + self.kappa_dim + self.dim]
+        if self.uses_log_c:
+            c = torch.exp(c)
         return random_cyclic_plastic_loading_torch_batch(
             epsp=signal[:, 0, :],
             k0=self.theta[:, :1],
             kap=self.theta[:, 1:1 + self.kappa_dim],
-            c=self.theta[:, 1 + self.kappa_dim:1 + self.kappa_dim + self.dim],
+            c=c,
             a=self.theta[:, 1 + self.kappa_dim + self.dim:],
         )
 
@@ -89,12 +99,15 @@ class MAFCPLModelFactory(AutoParameterObject, CPLModelFactory):
         """
         dim = self.model_kwargs['dim']
         kappa_dim = self.model_kwargs['kappa_dim']
-        log_shift = self.apriori_distribution_params.get('log_shift', 0)
+        uses_log_c = self.model_kwargs.get('uses_log_c', False)
+        c_prefix = 'log_' if uses_log_c else ''
         assert kappa_dim % 2 == 0
 
         a_sum = np.random.uniform(*self.apriori_distribution_params['a_sum_bound'])
         a_lower_bound = np.array([self.params_bound[f'a{i+1}'][0] for i in range(dim)])
+        c_lower_bound = np.array([self.params_bound[f'{c_prefix}c{i+1}'][0] for i in range(dim)])
         a_upper_bound = np.array([self.params_bound[f'a{i+1}'][1] for i in range(dim)])
+        c_upper_bound = np.array([self.params_bound[f'{c_prefix}c{i+1}'][1] for i in range(dim)])
         assert np.all(0 < a_lower_bound) and np.all(a_lower_bound < a_upper_bound)
         a = np.random.uniform(0, 1, size=dim)
         a /= np.sum(a)
@@ -111,21 +124,45 @@ class MAFCPLModelFactory(AutoParameterObject, CPLModelFactory):
 
         params = [np.random.uniform(*self.params_bound['k0'])]  # k0
         for i in range(kappa_dim):
-            if i % 2 == 0:
-                params.append(np.random.uniform(*self.params_bound[f'κ{i+1}']))  # kap1, kap3,...
-            else:
+            if i == 1:
                 params.append(1/np.random.uniform(*[1/j for j in self.params_bound[f'κ{i+1}'][::-1]]))  # kap2, kap4, ...
+            else:
+                params.append(np.random.uniform(*self.params_bound[f'κ{i+1}']))  # kap1, kap3,...
 
-        c = []
-        for i in range(dim):
-            c.append(np.exp(np.random.uniform(*[np.log(j+log_shift) for j in self.params_bound[f'c{i+1}']]))-log_shift)
-        c = np.array(c)
-        if (l := self.apriori_distribution_params.get('scale_c', 0)) > 0:
-            c *= np.log(1 + (a-a_lower_bound) * l) / np.log(1 + (a_upper_bound - a_lower_bound) * l)
+        if 'log_ac_bound' in self.apriori_distribution_params:
+            c = self.generate_c_from_log_ac(a, a_lower_bound, a_upper_bound, dim)
+            if uses_log_c:
+                c = np.log(c)
+        elif uses_log_c:
+            c = np.array([np.random.uniform(*self.params_bound[f'{c_prefix}c{i+1}']) for i in range(dim)])
+        else:
+            c = self.generate_c_direct(a, a_lower_bound, a_upper_bound, dim)
+            if uses_log_c:
+                c = np.log(c)
 
+        c = np.clip(c, c_lower_bound, c_upper_bound)
         sorted_ids = np.argsort(c[:self.sort_first])[::-1]
 
         return np.concatenate([params, c[sorted_ids], c[self.sort_first:], a[sorted_ids], a[self.sort_first:], *aL])
+
+    def generate_c_direct(self, a, a_lower_bound, a_upper_bound, dim):
+        log_shift = self.apriori_distribution_params.get('log_shift', 0)
+        c = []
+        for i in range(dim):
+            c.append(
+                np.exp(np.random.uniform(*[np.log(j + log_shift) for j in self.params_bound[f'c{i + 1}']])) - log_shift)
+        c = np.array(c)
+        if (l := self.apriori_distribution_params.get('scale_c', 0)) > 0:
+            c *= np.log(1 + (a - a_lower_bound) * l) / np.log(1 + (a_upper_bound - a_lower_bound) * l)
+        return c
+
+    def generate_c_from_log_ac(self, a, a_lower_bound, a_upper_bound, dim):
+        log_ac_bound = self.apriori_distribution_params['log_ac_bound']
+        assert dim == len(log_ac_bound)
+        log_ac = np.array([np.random.uniform(*log_ac_bound[i]) for i in range(dim)])
+        ac = np.exp(log_ac)
+        c = ac / a
+        return c
 
     def make_model(self, theta: np.ndarray | torch.Tensor = None):
         model = self.model_class(

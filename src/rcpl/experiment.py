@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from scipy.stats import beta
 from taskchain.parameter import AutoParameterObject
 
 
@@ -94,8 +95,9 @@ class RandomExperimentGenerator:
 
 class EpsPRandomExperimentGenerator(AutoParameterObject, RandomExperimentGenerator):
 
-    def __init__(self, epsp_uniform_params: tuple[int, int, int] = None, experiment_kwargs: dict = None):
-        self.epsp_uniform_params = epsp_uniform_params
+    def __init__(self, epsp_dist_config: dict = None, dist_type='uniform', experiment_kwargs: dict = None):
+        self.epsp_dist_config = epsp_dist_config if epsp_dist_config is not None else {}
+        self.dist_type = dist_type
         self.experiment_kwargs = experiment_kwargs if experiment_kwargs is not None else {}
 
     def generate_representation(self, definition: tuple):
@@ -109,16 +111,30 @@ class EpsPRandomExperimentGenerator(AutoParameterObject, RandomExperimentGenerat
             raise NotImplementedError
 
     def generate_by_geometrically_interpolated_epsp(self, points_per_segment: int, first_last_ratio: float) -> Experiment:
+        num_reversals = self.epsp_dist_config['num_reversals']
 
-        epsp_r = np.append(0, np.random.uniform(*self.epsp_uniform_params))
-        epsp_r[::2] *= -1
+        if self.dist_type == 'uniform':
+            epsp_r = np.append(0, np.random.uniform(*(self.epsp_dist_config['uniform'] + [num_reversals]), size=num_reversals))
+            epsp_r[::2] *= -1
+        elif self.dist_type == 'beta':
+            epsp_r = [0]
+            for i, j in enumerate(beta.rvs(self.epsp_dist_config['alpha'], self.epsp_dist_config['beta'],
+                                           size=num_reversals)):
+                if i > 2 and np.random.rand() < self.epsp_dist_config['return_same_chance']:
+                    epsp_r.append(epsp_r[-2])
+                else:
+                    a = epsp_r[-1] + (-1) ** i * self.epsp_dist_config['min_step']
+                    b = (-1) ** i * self.epsp_dist_config['bound']
+                    epsp_r.append(a + (b - a) * j)
+        else:
+            raise NotImplementedError
 
         r = first_last_ratio ** (1 / (points_per_segment - 2))  # Ratio between steps.
         geospace = np.array([r ** i for i in range(1, points_per_segment)])
         geospace /= np.sum(geospace)
         geospace = np.cumsum(geospace)
         epsp = [0]
-        for segment_id in range(self.epsp_uniform_params[-1]):
+        for segment_id in range(num_reversals):
             epsp.extend(
                 [epsp_r[segment_id + 1] * geo_val + (1 - geo_val) * epsp_r[segment_id] for geo_val in geospace])
         epsp = np.array(epsp)
@@ -127,11 +143,12 @@ class EpsPRandomExperimentGenerator(AutoParameterObject, RandomExperimentGenerat
 
     def generate_by_linearly_interpolated_epsp(self, points_per_segment: int) -> Experiment:
 
-        epsp_r = np.append(0, np.random.uniform(*self.epsp_uniform_params))
+        raise NotImplementedError
+        epsp_r = np.append(0, np.random.uniform(*self.epsp_dist_config))
         epsp_r[::2] *= -1
 
         epsp = [np.array([0])]
-        for segment_id in range(self.epsp_uniform_params[-1]):
+        for segment_id in range(self.epsp_dist_config[-1]):
             epsp.append(np.linspace(epsp_r[segment_id], epsp_r[segment_id + 1], points_per_segment + 1)[1:])
         epsp = np.concatenate(epsp)
 

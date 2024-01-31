@@ -1,5 +1,5 @@
 tasks: rcpl.tasks.processing.*
-uses: "{CONFIGS_DIR}/dataset/maf/2023-11-23.d1.2_4.maf2_4.yaml"
+uses: "{CONFIGS_DIR}/dataset/maf/2023-11-23.d1.maf2_4.yaml"
 
 
 model:

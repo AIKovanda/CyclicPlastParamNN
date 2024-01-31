@@ -6,12 +6,13 @@ from rcpl import config
 
 DEVICE = 'cuda'
 
-config_path = config.CONFIGS_DIR / sys.argv[1]
+relative_path = sys.argv[1].replace('configs/', '')
+config_path = config.CONFIGS_DIR / relative_path
 
 conf = Config(
     config.TASKS_DIR,  # where Taskchain data should be stored
     config_path,
-    context={'device': DEVICE},
+    context={'device': DEVICE, 'run_name': relative_path},
     global_vars=config,  # set global variables
 )
 chain = conf.chain()
@@ -21,6 +22,7 @@ print(chain.dataset_info.value)
 
 print(chain.train_model)
 _ = chain.train_model.force().value
+# _ = chain.train_model.value
 # input("Press Enter to continue...")
 
 print("Calculating metrics for ", sys.argv[1])

@@ -36,7 +36,7 @@ class DatasetInfoTask(ModuleTask):
         random_num_model = model_factory.make_model()
         y = np.zeros((n_samples_for_stats, random_num_model.theta_len), dtype=np.float64)
         for i in trange(n_samples_for_stats, desc='Generating random parameters'):
-            if experiment is None:
+            if exp_generator is not None:
                 experiment = exp_generator.generate_representation(exp_representation)
 
             num_model = model_factory.make_model()
@@ -61,6 +61,7 @@ class DatasetInfoTask(ModuleTask):
             'x_min': np.min(x).tolist(),
             'x_max': np.max(x).tolist(),
             'exp_representation': list(exp_representation),
+            'cpl_model_channels': cpl_model_channels,
         }
 
 
@@ -105,7 +106,7 @@ class DatasetDirTask(ModuleTask):
         y = np.zeros((split[-1], random_num_model.theta_len), dtype=np.float64)
 
         for i in trange(split[-1]):
-            if experiment is None:
+            if exp_generator is not None:
                 experiment = exp_generator.generate_representation(exp_representation)
 
             num_model = model_factory.make_model()

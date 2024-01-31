@@ -1,5 +1,4 @@
 import pickle
-from collections import deque
 
 import numpy as np
 
@@ -41,8 +40,8 @@ class Reporter:
         self.mean_sum[key] += np.mean(value)
         self.mean_counts[key] += 1
 
-    def save(self, path):
-        with open(path, 'wb') as f:
+    def save(self, pickle_path):
+        with open(pickle_path, 'wb') as f:
             pickle.dump(self._stats, f, pickle.HIGHEST_PROTOCOL)
 
 

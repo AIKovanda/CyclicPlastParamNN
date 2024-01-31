@@ -3,7 +3,7 @@ tasks: rcpl.tasks.dataset.*
 exp_generator:
   class: rcpl.experiment.RandomExperimentGenerator
   kwargs:
-    epsp_uniform_params: [0.003, 0.005, 43]
+    epsp_dist_config: [0.003, 0.005, 43]
 
 exp_representation: ['geom', 15, 20]
 

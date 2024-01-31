@@ -30,6 +30,15 @@ class InceptionModule(nn.Module):
         return_indices			Indices are needed only if we want to create decoder with InceptionTranspose with MaxUnpool1d.
         """
         super(InceptionModule, self).__init__()
+
+        if kernel_sizes is None:
+            kernel_sizes = [9, 19, 39]
+
+        def to_odd(x):
+            return x if x % 2 != 0 else x + 1
+
+        kernel_sizes = [to_odd(x) for x in kernel_sizes]
+
         self.in_channels = in_channels
         self.n_filters = n_filters
         self.kernel_sizes = kernel_sizes
@@ -37,9 +46,6 @@ class InceptionModule(nn.Module):
         self.activation = activation
         self.use_batch_norm = use_batch_norm
         self.return_indices = return_indices
-
-        if kernel_sizes is None:
-            kernel_sizes = [9, 19, 39]
 
         if in_channels > 1:
             self.bottleneck = nn.Conv1d(
@@ -367,14 +373,34 @@ class InceptionTime(nn.Module):
         self.out_activation_function = get_activation(self.out_activation)
 
         self.bn_layer = nn.BatchNorm1d(in_channels)
-
         self.inception_blocks = ModuleList(block_list)
 
         self.in_features = (1 + len(last_kernel_size)) * last_n_filters * 1
-        if self.outputs > 0:
+        if isinstance(self.outputs, list):
+            # make 1 channel from the input
+            layers = self.outputs
+            self.cnn_layer = None
+            self.nn_layers = nn.ModuleList()
+            if self.outputs[0] < 0:
+                self.cnn_layer = nn.Conv1d(
+                    in_channels=4 * last_n_filters,
+                    out_channels=-self.outputs[0],
+                    kernel_size=1,
+                    stride=1,
+                    padding=0,
+                    bias=False,
+                )
+                layers = self.outputs[1:]
+
+            for i, layer in enumerate(layers[:-1]):
+                self.nn_layers.append(nn.Linear(layer, layers[i+1]))
+                if i < len(layers) - 2:
+                    self.nn_layers.append(nn.ReLU())
+
+        elif self.outputs > 0:
             self.adaptive_pool = nn.AdaptiveAvgPool1d(output_size=1)
             self.linear1 = nn.Linear(
-                in_features=self.in_features,
+                in_features=self.in_features,  # because
                 out_features=outputs)
 
         elif self.outputs < 0:
@@ -387,7 +413,7 @@ class InceptionTime(nn.Module):
                 bias=False,
             )
         else:
-            raise ValueError(f"Outputs cannot be 0.")
+            raise ValueError(f"Outputs do not make sense: {self.outputs}.")
 
     def forward(self, x):
         if self.batchnorm:
@@ -396,11 +422,17 @@ class InceptionTime(nn.Module):
             x = block(x)
             x = pooling(x)
 
-        if self.outputs > 0:
+        if isinstance(self.outputs, list):
+            if self.cnn_layer is not None:
+                x = self.cnn_layer(x)
+            x = x.reshape(x.shape[0], -1)
+            for layer in self.nn_layers:
+                x = layer(x)
+        elif self.outputs > 0:
             x = self.adaptive_pool(x)
             x = x.view(-1, self.in_features)
             x = self.linear1(x)
-        else:
+        elif self.outputs < 0:
             x = self.final_conv(x)
 
         return self.out_activation_function(x)

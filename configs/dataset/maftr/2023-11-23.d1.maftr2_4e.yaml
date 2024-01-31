@@ -1,0 +1,39 @@
+tasks: rcpl.tasks.dataset.*
+
+experiment:
+  class: rcpl.experiment.Experiment
+  kwargs:
+    json_path: "{DATA_DIR}/epsp_stress/measured/2023-11-23.json"
+    crop_signal: [0, 681]
+
+exp_representation: ['geom', 17, 20]
+cpl_model_channels: ['epsp']
+x_channels: ['stress']
+
+model_factory:
+    class: rcpl.cpl_models.maftr.MAFTrCPLModelFactory
+    kwargs:
+      params_bound:
+        k0: [15, 250]
+        κ1: [100, 10000]
+        κ2: [0.00666666, 0.033333]
+        log_c1: [7, 11]
+        log_c2: [2, 9]
+        log_c3: [2, 8]
+        log_c4: [2, 8]
+        a1: [ 0.000000001, 200 ]
+        a2: [ 0.000000001, 200 ]
+        a3: [ 0.000000001, 200 ]
+        a4: [ 0.000000001, 200 ]
+        aL: [ 0, 500 ]
+      apriori_distribution_params:
+        a_sum_bound: [100, 400]
+      model_kwargs:
+        dim: 4
+        kappa_dim: 2
+        uses_log_c: true
+
+split: [0, 1000000, 1020000, 1120000]
+n_samples_for_stats: 1000000
+
+scale_type: 'standard'  # 'standard' or 'minmax'
