@@ -32,6 +32,10 @@ class ChainPredictor:
     def model_metrics(self):
         return self.chain.model_metrics.value
 
+    def get_experiment_data(self, _exp_path):
+        epsp, stress = self.chain.real_experiment.value(_exp_path)[1:]
+        return epsp[0], stress[0]
+
     def predict_from_json(self, _exp_path):
         model_input, signal, stress = self.chain.real_experiment.value(_exp_path)
         net = self.chain.trained_model.value
