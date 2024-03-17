@@ -11,7 +11,7 @@ cpl_model_channels: ['epsp']
 x_channels: ['stress']
 
 model_factory:
-    class: rcpl.cpl_models.maftr.MAFTrCPLModelFactory
+    class: rcpl.material_model.maftr.MAFTrCPLModelFactory
     kwargs:
       params_bound:
         k0: [15, 250]

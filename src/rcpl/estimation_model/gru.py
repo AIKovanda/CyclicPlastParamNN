@@ -3,8 +3,8 @@ import torch
 from taskchain.parameter import AutoParameterObject
 from torch import nn
 
-from rcpl.models.inceptiontime import InceptionBlock
-from rcpl.models.tools import get_activation
+from rcpl.estimation_model.inceptiontime import InceptionBlock
+from rcpl.estimation_model.tools import get_activation
 
 
 class GRU(AutoParameterObject, nn.Module):

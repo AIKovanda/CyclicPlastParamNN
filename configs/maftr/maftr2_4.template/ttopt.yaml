@@ -2,7 +2,7 @@ tasks: rcpl.tasks.processing.*
 uses: "{CONFIGS_DIR}/dataset/maftr/maftr2_4.yaml"
 
 model:
-  class: rcpl.models.ttopt.TTOptModel
+  class: rcpl.estimation_model.ttopt.TTOptModel
   kwargs:
     rank: 10
     ttopt_params:

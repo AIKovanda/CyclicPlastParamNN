@@ -19,7 +19,7 @@ cpl_model_channels: ['epsp']
 x_channels: ['stress', 'epsp']
 
 model_factory:
-    class: rcpl.cpl_models.custom_model.CustomModelFactory
+    class: rcpl.material_model.custom_model.CustomModelFactory
     kwargs:
       params_bound:
         alpha: [0, 5]

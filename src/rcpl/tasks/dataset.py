@@ -10,7 +10,7 @@ from tqdm import trange
 from rcpl.config import BASE_DIR
 from rcpl.dataset import CPLDataset
 from rcpl.experiment import Experiment, RandomExperimentGenerator
-from rcpl.cpl_models import CPLModelFactory
+from rcpl.material_model import CPLModelFactory
 
 
 class DatasetInfoTask(ModuleTask):

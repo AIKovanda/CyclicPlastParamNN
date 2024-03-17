@@ -3,7 +3,7 @@ from functools import partial
 import numpy as np
 from scipy.optimize import fmin
 
-from rcpl.cpl_models import CPLModelFactory
+from rcpl.material_model import CPLModelFactory
 
 
 def validate(unscaled_theta, lower_bound, upper_bound):

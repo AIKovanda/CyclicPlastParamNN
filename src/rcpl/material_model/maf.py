@@ -5,7 +5,7 @@ import torch
 from numba import jit
 from taskchain.parameter import AutoParameterObject
 
-from rcpl.cpl_models import CPLModel, CPLModelFactory
+from rcpl.material_model import CPLModel, CPLModelFactory
 
 SQR32 = np.sqrt(1.5)
 

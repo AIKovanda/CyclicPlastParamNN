@@ -2,7 +2,7 @@ tasks: rcpl.tasks.processing.*
 uses: "{CONFIGS_DIR}/dataset/custom_model/custom_model1.yaml"
 
 model:
-  class: rcpl.models.gru.GRU
+  class: rcpl.estimation_model.gru.GRU
   kwargs:
     batchnorm: true
     in_channels: 2

@@ -2,7 +2,7 @@ tasks: rcpl.tasks.processing.*
 uses: "{CONFIGS_DIR}/dataset/maftr/exp2023-11-23.maftr2_4.yaml"
 
 model:
-  class: rcpl.models.lstm.LSTM
+  class: rcpl.estimation_model.lstm.LSTM
   kwargs:
     batchnorm: true
     in_channels: 1

@@ -3,7 +3,7 @@ uses: "{CONFIGS_DIR}/dataset/maftr/exp2023-11-23.maftr2_4.yaml"
 
 
 model:
-  class: rcpl.models.inceptiontime.InceptionTime
+  class: rcpl.estimation_model.inceptiontime.InceptionTime
   kwargs:
     batchnorm: true
     build_config:

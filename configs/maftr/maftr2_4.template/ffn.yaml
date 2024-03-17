@@ -3,7 +3,7 @@ uses: "{CONFIGS_DIR}/dataset/maftr/maftr2_4.yaml"
 
 
 model:
-  class: rcpl.models.ffn.FFN
+  class: rcpl.estimation_model.ffn.FFN
   kwargs:
     inputs: 681
     layers: [512, 256, 128]

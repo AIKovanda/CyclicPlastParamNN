@@ -3,7 +3,7 @@ import torch
 from taskchain.parameter import AutoParameterObject
 from ttopt import TTOpt
 
-from rcpl.simplex import to_optimize_one
+from rcpl.utils.simplex import to_optimize_one
 
 
 class TTOptModel(AutoParameterObject):

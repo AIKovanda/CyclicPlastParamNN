@@ -6,8 +6,8 @@ import torch
 import yaml
 
 from rcpl.config import DATA_DIR, MEASURED_EXP_DIR, GENERATED_EXP_DIR
-from rcpl.cpl_models.maf import MAFCPLModelFactory
-from rcpl.cpl_models.maftr import MAFTr, MAFTrCPLModelFactory
+from rcpl.material_model.maf import MAFCPLModelFactory
+from rcpl.material_model.maftr import MAFTr, MAFTrCPLModelFactory
 from rcpl.experiment import Experiment
 
 FACTORIES = {

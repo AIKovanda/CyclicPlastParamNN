@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from torch.nn import ModuleList
 
-from rcpl.models.tools import get_activation
+from rcpl.estimation_model.tools import get_activation
 
 
 def correct_sizes(sizes):

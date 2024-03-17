@@ -12,14 +12,14 @@ from torch.utils.data import Dataset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm, trange
 
-from rcpl import metrics
 from rcpl.config import RUNS_DIR, MEASURED_EXP_DIR
-from rcpl.cpl_models import CPLModelFactory
+from rcpl.estimation_model import metrics
 from rcpl.experiment import Experiment
-from rcpl.reporter import Reporter
-from rcpl.simplex import simplex
+from rcpl.material_model import CPLModelFactory
 from rcpl.tasks.dataset import TrainDatasetTask, ValDatasetTask, GetRandomPseudoExperimentTask, DatasetInfoTask, \
     UnscaleThetaTorchTask, GetCrlbTask, TestDatasetTask, ScaleThetaTorchTask, ModelFactoryTask
+from rcpl.utils.reporter import Reporter
+from rcpl.utils.simplex import simplex
 
 
 def evaluate_model(valid_dataloader_kwargs, model_factory: CPLModelFactory, dataset_info, x_metrics, y_metrics, model,

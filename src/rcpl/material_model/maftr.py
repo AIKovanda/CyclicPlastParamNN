@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from numba import jit
 
-from rcpl.cpl_models.maf import MAFModel, MAFCPLModelFactory
+from rcpl.material_model.maf import MAFModel, MAFCPLModelFactory
 
 SQR32 = np.sqrt(1.5)
 

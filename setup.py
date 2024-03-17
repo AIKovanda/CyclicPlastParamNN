@@ -19,7 +19,14 @@ setuptools.setup(
         "Operating System :: OS Independent",
     ],
     python_requires='>=3.10',
-    install_requires=[],
+    install_requires=[
+        'torch',
+        'taskchain',
+        'numpy',
+        'pandas',
+        'scipy',
+        'matplotlib',
+    ],
     setup_requires=['pytest-runner'],
     tests_require=['pytest'],
 )
