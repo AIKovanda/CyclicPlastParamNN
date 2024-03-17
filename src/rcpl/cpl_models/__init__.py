@@ -67,6 +67,7 @@ class CPLModelFactory:
         self.params_bound = params_bound
         self.model_kwargs = model_kwargs if model_kwargs is not None else {}
         self.apriori_distribution_params = apriori_distribution_params if apriori_distribution_params is not None else {}
+        self.num_params = len(params_bound)
 
     @property
     def lower_bound(self) -> np.ndarray:

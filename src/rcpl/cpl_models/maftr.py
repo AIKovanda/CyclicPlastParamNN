@@ -29,7 +29,7 @@ class MAFTr(MAFModel):
         if self.uses_log_c:
             c = torch.exp(c)
         return random_cyclic_plastic_loading_torch_batch(
-            epsp=torch.unsqueeze(signal, 0),
+            epsp=signal.reshape(1, -1),
             k0=torch.unsqueeze(self.theta[:1], 0),
             kap=torch.unsqueeze(self.theta[1:1 + self.kappa_dim], 0),
             c=c,

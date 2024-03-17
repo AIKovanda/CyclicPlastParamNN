@@ -1,0 +1,38 @@
+tasks: rcpl.tasks.processing.*
+uses: "{CONFIGS_DIR}/dataset/maftr/maftr2_4.yaml"
+
+model:
+  class: rcpl.models.ttopt.TTOptModel
+  kwargs:
+    rank: 3
+    ttopt_params:
+      p: 2  # The grid size factor (there will n=p^q points)
+      q: 10  # The grid size factor (there will n=p^q points)
+      evals: 100000  # Number of function evaluations
+      name: Alpine  # Function name for log (this is optional)
+      y_opt_real: 0.  # Real value of y-minima (y=f(x); this is for test)
+
+takes_max_length: 681
+takes_channels: ['stress', 'epsp']
+do_compile: false
+is_trainable: false
+prediction_is_scaled: false
+# chosen_checkpoint: 199
+
+
+persistent_training_params:
+other_training_params:
+  metrics:
+    x_metrics_items: 32
+    x_metrics:
+      x_l2: 'x_l2'
+
+    y_metrics:
+      y_l2: 'y_l2'
+
+eval_on_experiments: [ '2023-11-23' ]
+
+run_name: 'ttopt'
+loss_func: 'MSELoss'
+
+single_score_definition: "mm['exp/2023-11-23n'] / 10 + mm['simplex']['new_x_l2']"

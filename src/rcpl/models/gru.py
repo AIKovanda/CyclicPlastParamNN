@@ -62,8 +62,8 @@ class GRU(AutoParameterObject, nn.Module):
             else:
                 out = out[:, -1, :]
         # out: (n, 128)
-        for i, fc in enumerate(self.fcs):
-            out = fc(out)
+        for i, ffn in enumerate(self.fcs):
+            out = ffn(out)
             # relu everywhere expect last layer
             if i < len(self.fcs) - 1:
                 out = torch.relu(out)
@@ -104,7 +104,7 @@ class InceptionGRU(nn.Module):
                     bias=bias,
                 )
         self.rnn = nn.GRU(n_filters * 4 + in_channels, hidden_size, layers, batch_first=True)
-        self.fc = nn.Linear(hidden_size*4*self.pool_size, outputs)
+        self.ffn = nn.Linear(hidden_size*4*self.pool_size, outputs)
         self.max = nn.AdaptiveMaxPool1d(output_size=self.pool_size)
         self.avg = nn.AdaptiveAvgPool1d(output_size=self.pool_size)
 
@@ -120,4 +120,4 @@ class InceptionGRU(nn.Module):
             out_inc = self.inc2(x)
             outs.append(self.avg(out_inc).view(-1, self.hidden_size*self.pool_size))
             outs.append(self.max(out_inc).view(-1, self.hidden_size*self.pool_size))
-        return self.fc(torch.concat(outs, dim=-1))
+        return self.ffn(torch.concat(outs, dim=-1))

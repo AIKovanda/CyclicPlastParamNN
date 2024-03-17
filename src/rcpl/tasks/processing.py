@@ -1,6 +1,3 @@
-import json
-from datetime import datetime
-from functools import partial
 from itertools import chain
 from pathlib import Path
 from typing import Callable
@@ -9,7 +6,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from scipy.optimize import fmin
 from taskchain import Parameter, ModuleTask, DirData, InMemoryData
 from torch.utils.data import DataLoader, Subset
 from torch.utils.data import Dataset
@@ -21,69 +17,21 @@ from rcpl.config import RUNS_DIR, MEASURED_EXP_DIR
 from rcpl.cpl_models import CPLModelFactory
 from rcpl.experiment import Experiment
 from rcpl.reporter import Reporter
+from rcpl.simplex import simplex
 from rcpl.tasks.dataset import TrainDatasetTask, ValDatasetTask, GetRandomPseudoExperimentTask, DatasetInfoTask, \
     UnscaleThetaTorchTask, GetCrlbTask, TestDatasetTask, ScaleThetaTorchTask, ModelFactoryTask
 
 
-def validate(unscaled_theta, lower_bound, upper_bound):
-    if np.any(unscaled_theta < lower_bound-1e-9):
-        return False
-    if np.any(unscaled_theta > upper_bound+1e-9):
-        return False
-    return True
-
-
-def to_optimize_one(unscaled_theta, true_stress, signal_, model_factory: CPLModelFactory) -> float:
-    if not validate(unscaled_theta, model_factory.simplex_lower_bound, model_factory.simplex_upper_bound):
-        return np.inf
-    res = model_factory.make_model(theta=unscaled_theta).predict_stress(signal_)
-    return float(np.mean((res - true_stress) ** 2))
-
-
-def simplex(unscaled_theta: np.ndarray, true_stress: np.ndarray, signal: np.ndarray, model_factory: CPLModelFactory, verbose=True) -> tuple[
-        np.ndarray, list, list]:
-    opt_theta = np.zeros_like(unscaled_theta)
-    new_values = []
-    old_values = []
-    for i, (theta_i, true_stress_i, signal_i) in enumerate(zip(unscaled_theta, true_stress, signal)):
-        if not validate(theta_i, model_factory.simplex_lower_bound, model_factory.simplex_upper_bound):
-            more_than_bound = theta_i - model_factory.simplex_upper_bound
-            more_than_bound[more_than_bound < 0] = 0
-            less_than_bound = model_factory.simplex_lower_bound - theta_i
-            less_than_bound[less_than_bound < 0] = 0
-            if verbose:
-                print(f'BUG - not valid - clipping...\n'
-                      f'Above bound: {more_than_bound}\n'
-                      f'Below bound: {less_than_bound}')
-            theta_i = np.clip(theta_i, model_factory.simplex_lower_bound+1e-9, model_factory.simplex_upper_bound-1e-9)
-        assert validate(theta_i, model_factory.simplex_lower_bound, model_factory.simplex_upper_bound)
-        now_value = to_optimize_one(theta_i, true_stress_i, signal_i, model_factory=model_factory)
-        # print('Now:', now_value)
-        new_theta_i = fmin(partial(to_optimize_one, true_stress=true_stress_i, signal_=signal_i, model_factory=model_factory),
-                           theta_i, disp=0)
-
-        assert validate(new_theta_i, model_factory.simplex_lower_bound, model_factory.simplex_upper_bound)
-        opt_theta[i] = new_theta_i
-        new_value = to_optimize_one(opt_theta[i], true_stress_i, signal_i, model_factory=model_factory)
-        if now_value < new_value:
-            opt_theta[i] = theta_i
-            print('BUG - new is worse')
-        # print('New:', new_value)
-        # print('Old:', now_value)
-        new_values.append(new_value)
-        old_values.append(now_value)
-    return opt_theta, new_values, old_values
-
-
 def evaluate_model(valid_dataloader_kwargs, model_factory: CPLModelFactory, dataset_info, x_metrics, y_metrics, model,
                    val_dataset, device, get_random_pseudo_experiment, eval_type='raw', use_tqdm=False,
-                   tqdm_message=None, unscale_theta_torch=None, scale_theta_torch=None, prediction_is_scaled=True):
+                   tqdm_message=None, unscale_theta_torch=None, scale_theta_torch=None, prediction_is_scaled=True,
+                   store_limit=0):
     model.eval()
 
     labels = dataset_info['labels']
     train_ldr = DataLoader(val_dataset, **valid_dataloader_kwargs)
 
-    reporters = [Reporter(), Reporter()]  # raw, simplex
+    reporters = [Reporter(store_limit=store_limit), Reporter(store_limit=store_limit)]  # raw, simplex
     mse_loss_func = nn.MSELoss()
     if use_tqdm:
         train_ldr = tqdm(train_ldr, ncols=120, desc=tqdm_message)
@@ -114,8 +62,8 @@ def evaluate_model(valid_dataloader_kwargs, model_factory: CPLModelFactory, data
                         verbose=False,
                     )
                     unscaled_y_pred = torch.from_numpy(unscaled_y_pred).to(device)
-                    reporters[reporter_id].add_mean('old_x_l2', np.mean(old_values))
-                    reporters[reporter_id].add_mean('new_x_l2', np.mean(new_values))
+                    reporters[reporter_id].add_data('old_x_l2', np.mean(old_values))
+                    reporters[reporter_id].add_data('new_x_l2', np.mean(new_values))
                     y_pred_scaled = scale_theta_torch(unscaled_y_pred)
 
                 else:
@@ -124,31 +72,34 @@ def evaluate_model(valid_dataloader_kwargs, model_factory: CPLModelFactory, data
                     else:
                         y_pred_scaled = scale_theta_torch(y_pred_raw.clone())
                 
-                reporters[reporter_id].add_mean('Loss/val/_all', mse_loss_func(y_pred_scaled, y_true).item())
+                reporters[reporter_id].add_data('Loss/val/_all', mse_loss_func(y_pred_scaled, y_true).item())
                 for metric_name, metric_func in y_metrics.items():
-                    reporters[reporter_id].add_mean(f'{metric_name}/val', metric_func(y_pred=y_pred_scaled, y_true=y_true))
+                    reporters[reporter_id].add_data(f'{metric_name}/val', metric_func(y_pred=y_pred_scaled, y_true=y_true))
 
                 if labels is not None:
                     for param_value, param_name in zip(torch.mean((y_pred_scaled - y_true) ** 2, dim=0).cpu().numpy().tolist(), labels):
-                        reporters[reporter_id].add_mean(f'{param_name}/val', param_value)
+                        reporters[reporter_id].add_data(f'{param_name}/val', param_value)
 
                 # comparing x_pred and x_true
                 if len(x_metrics) > 0:
                     for item_id, (x_i_true, y_i_pred_npy, signal_i) in enumerate(zip(x_true.detach(),
                                   y_pred_scaled.detach().cpu().numpy(), signal.cpu().numpy())):
                         x_i_pred = torch.from_numpy(
-                            get_random_pseudo_experiment(scaled_theta=y_i_pred_npy, signal_correct_representation=signal_i)).to(device)
+                            get_random_pseudo_experiment(theta=y_i_pred_npy, signal_correct_representation=signal_i, is_scaled=True)).to(device)
 
                         for metric_name, metric_func in x_metrics.items():
-                            reporters[reporter_id].add_mean(f'{metric_name}/val', metric_func(x_pred=x_i_pred, x_true=x_i_true[:1]))
+                            reporters[reporter_id].add_data(f'{metric_name}/val', metric_func(x_pred=x_i_pred, x_true=x_i_true[:1]))
 
     model.train()
-    if eval_type == 'raw':
-        return reporters[0].get_mean()
-    elif eval_type == 'simplex':
-        return reporters[1].get_mean()
-    else:
-        return {'raw': reporters[0].get_mean(), 'simplex': reporters[1].get_mean()}
+    result = {}
+    assert eval_type in ['raw', 'simplex', 'both']
+    if eval_type == 'raw' or eval_type == 'both':
+        result['raw_data'] = reporters[0].get_stored()
+        result['raw'] = reporters[0].get_mean()
+    if eval_type == 'simplex' or eval_type == 'both':
+        result['simplex_data'] = reporters[1].get_stored()
+        result['simplex'] = reporters[1].get_mean()
+    return result
 
 
 def get_metrics(metrics_config: dict | None):
@@ -341,41 +292,41 @@ class TrainModelTask(ModuleTask):
                     opt.zero_grad()
                     loss_val.backward()  # compute gradients
                     for loss_name, loss_value in loss_stat.items():
-                        reporter.add_mean(loss_name, loss_value)
+                        reporter.add_data(loss_name, loss_value)
 
                     with torch.no_grad():
                         for exp_name, (_nn_input, _signal, _stress) in measured_experiments.items():
                             _theta_hat = model(torch.unsqueeze(torch.from_numpy(_nn_input), 0).float().to(device))
-                            _stress_hat = get_random_pseudo_experiment(scaled_theta=_theta_hat[0].cpu().numpy(), signal_correct_representation=_signal)
-                            reporter.add_mean(f'exp/{exp_name}', np.mean((_stress_hat - _stress) ** 2))
+                            _stress_hat = get_random_pseudo_experiment(theta=_theta_hat[0].cpu().numpy(), signal_correct_representation=_signal, is_scaled=True)
+                            reporter.add_data(f'exp/{exp_name}', np.mean((_stress_hat - _stress) ** 2))
                             if (total_batch_id + 1) % 10 == 0:
                                 unscaled_theta = unscale_theta_torch(_theta_hat).cpu().numpy()
                                 _, new_values, old_values = simplex(unscaled_theta=unscaled_theta, true_stress=np.expand_dims(_stress, 0), signal=np.expand_dims(_signal, 0),
                                                                     model_factory=model_factory, verbose=False)
-                                reporter.add_mean(f'exp/{exp_name}o', old_values[0])
-                                reporter.add_mean(f'exp/{exp_name}n', new_values[0])
+                                reporter.add_data(f'exp/{exp_name}o', old_values[0])
+                                reporter.add_data(f'exp/{exp_name}n', new_values[0])
 
                         for metric_name, metric_func in y_metrics.items():
-                            reporter.add_mean(metric_name, metric_func(y_pred=y_pred, y_true=y_true))
+                            reporter.add_data(metric_name, metric_func(y_pred=y_pred, y_true=y_true))
 
                         if labels is not None:
                             for param_value, param_label in zip(
                                     torch.mean((y_pred - y_true) ** 2, dim=0).cpu().numpy().tolist(), labels):
-                                reporter.add_mean(f'{param_label}/train', param_value)
+                                reporter.add_data(f'{param_label}/train', param_value)
 
                         # comparing x_pred and x_true
                         if len(x_metrics) > 0:
                             for item_id, (x_i_true, y_i_pred_npy, signal_i) in enumerate(zip(x_true.detach(),
                                           y_pred.detach().cpu().numpy(), signal.cpu().numpy())):
                                 x_i_pred = torch.from_numpy(
-                                    get_random_pseudo_experiment(scaled_theta=y_i_pred_npy, signal_correct_representation=signal_i)).to(device)
+                                    get_random_pseudo_experiment(theta=y_i_pred_npy, signal_correct_representation=signal_i, is_scaled=True)).to(device)
 
                                 for metric_name, metric_func in x_metrics.items():
                                     # if item_id == 0:
                                     #     print(f'\nx_i_true {x_i_true.shape}: {x_i_true[0, :50]}')
                                     #     print(f'x_i_pred{x_i_pred.shape}: {x_i_pred[:50]}')
                                     #     print(f'metric: {metric_func(x_pred=x_i_pred, x_true=x_i_true[0])}')
-                                    reporter.add_mean(metric_name, metric_func(x_pred=x_i_pred, x_true=x_i_true[0]))
+                                    reporter.add_data(metric_name, metric_func(x_pred=x_i_pred, x_true=x_i_true[0]))
 
                                 if item_id > x_metrics_items:
                                     break
@@ -438,7 +389,7 @@ class TrainModelTask(ModuleTask):
             torch.save(model.state_dict(), data.dir / f'weights.pt')
 
         except KeyboardInterrupt:
-            raise KeyboardInterrupt
+            raise NotImplementedError
             return data
         return data
 
@@ -489,7 +440,7 @@ class TrainedModelTask(ModuleTask):
     class Meta:
         data_class = InMemoryData
         input_tasks = [
-            TrainModelTask,
+            TrainModelTask, ModelFactoryTask,
         ]
         parameters = [
             Parameter("model"),
@@ -500,7 +451,7 @@ class TrainedModelTask(ModuleTask):
         ]
 
     def run(self, train_model: Path, model, do_compile: bool, device: str,
-            is_trainable: bool,
+            is_trainable: bool, model_factory: CPLModelFactory,
             chosen_checkpoint: int | None) -> object:
         if chosen_checkpoint is not None:
             weights_path = train_model / f'weights_{chosen_checkpoint}.pt'
@@ -511,52 +462,92 @@ class TrainedModelTask(ModuleTask):
             model = torch.compile(model)
         if is_trainable:
             model.load_state_dict(torch.load(str(weights_path)))
+        else:
+            model.model_factory = model_factory
         return model
 
 
 class ValidateCrlbTask(ModuleTask):
     class Meta:
-        input_tasks = [RealExperimentTask, GetCrlbTask, TrainedModelTask, UnscaleThetaTorchTask, DatasetInfoTask]
+        data_class = InMemoryData
+        input_tasks = [RealExperimentTask, GetCrlbTask, TrainedModelTask, UnscaleThetaTorchTask, DatasetInfoTask, ModelFactoryTask]
         parameters = [
             Parameter("device", default="cuda", ignore_persistence=True),
             Parameter("crlb_runs", default=1000),
             Parameter("takes_channels"),
         ]
 
-    def run(self, real_experiment, get_crlb, trained_model, device, unscale_params_torch, crlb_runs,
-            dataset_info, takes_channels) -> dict:
-        out = {}
-        trained_model.eval()
-        all_unscaled_theta = torch.zeros((crlb_runs, 1 + 2 * dataset_info['dim'] + dataset_info['kappa_dim']))
-        for experiment_name, sig in real_experiment.items():
-            with torch.no_grad():
-                theta_hat = trained_model(torch.unsqueeze(torch.from_numpy(sig), 0).float().to(device))[0]
-            epsp = REAL_EXPERIMENT[experiment_name]['epsp']
-            unscaled_theta = unscale_params_torch(theta_hat)
-            crlb = get_crlb(epsp, unscaled_theta)
+    def run(self, real_experiment, get_crlb, trained_model, device, unscale_theta_torch, crlb_runs,
+            dataset_info, takes_channels, model_factory: CPLModelFactory) -> Callable:
+        def get_crlb_(exp_path, crop_signal, unscaled_theta=None, fraction=0.001):
+            trained_model.eval()
+            nn_input, signal, stress = real_experiment(exp_path)
+            signal = torch.from_numpy(signal)
+
+            if unscaled_theta is None:
+                with torch.no_grad():
+                    theta_hat = trained_model(torch.unsqueeze(torch.from_numpy(nn_input), 0).float().to(device))
+
+                unscaled_theta = unscale_theta_torch(theta_hat).detach().cpu()[0]
+            if isinstance(unscaled_theta, np.ndarray):
+                unscaled_theta = torch.from_numpy(unscaled_theta)
+
+            num_model = model_factory.make_model(unscaled_theta.double())
+            stress_pred = num_model.predict_stress_torch(signal)
+
+            crlb = get_crlb(signal, unscaled_theta)
+
+            all_unscaled_theta = torch.zeros((crlb_runs, len(unscaled_theta)))
             with torch.no_grad():
                 for i in trange(crlb_runs):
-                    # uniform random increment
-                    random_increment = torch.randn_like(theta_hat) * torch.from_numpy(crlb['std']).to(device) / 10000
-                    unscaled_theta_mod = torch.clip(unscaled_theta + random_increment, min=1e-9, max=None)
-                    sig_hat = predict_stress_torch(theta=unscaled_theta_mod, epsp=torch.tensor(epsp).to(device),
-                                             dim=dataset_info['dim'], kappa_dim=dataset_info['kappa_dim'])
-                    if takes_epsp:
-                        sig_hat = torch.unsqueeze(torch.vstack([sig_hat, torch.tensor([epsp]).to(device)]), 0).float()
-                    else:
-                        sig_hat = torch.unsqueeze(torch.unsqueeze(sig_hat.float(), 0), 0).to(device)
-                    theta_hat_hat = trained_model(sig_hat)[0]
-                    all_unscaled_theta[i] = (unscale_params_torch(theta_hat_hat) - random_increment).cpu()
+                    # # uniform random increment
+                    # random_increment = torch.randn_like(unscaled_theta, device='cpu') * torch.from_numpy(crlb['std']).cpu() * fraction
+                    # unscaled_theta_mod = torch.clip(unscaled_theta + random_increment, min=1e-9, max=None)
+                    # num_model_mod = model_factory.make_model(unscaled_theta_mod)
+                    # stress_pred_mod = num_model_mod.predict_stress_torch(signal)
+                    # experiment = Experiment(
+                    #     signal=torch.vstack([signal, stress_pred_mod]),
+                    #     channel_labels=dataset_info['cpl_model_channels'] + ['stress'],
+                    #     representation=dataset_info['exp_representation'],
+                    #     crop_signal=crop_signal,
+                    # )
+                    # theta_hat_hat = trained_model(experiment.get_signal_representation(dataset_info['exp_representation'], channels=takes_channels).float().unsqueeze(0).to(device))[0]
+                    # all_unscaled_theta[i] = unscale_theta_torch(theta_hat_hat).cpu() - random_increment
 
-            out[experiment_name] = {
+                    # uniform random increment
+                    random_increment = torch.randn_like(stress_pred, device='cpu') * fraction
+                    stress_pred_mod = stress_pred + random_increment
+                    experiment = Experiment(
+                        signal=torch.vstack([signal, stress_pred_mod]),
+                        channel_labels=dataset_info['cpl_model_channels'] + ['stress'],
+                        representation=dataset_info['exp_representation'],
+                        crop_signal=crop_signal,
+                    )
+                    theta_hat_hat = trained_model(experiment.get_signal_representation(dataset_info['exp_representation'], channels=takes_channels).float().unsqueeze(0).to(device))[0]
+                    all_unscaled_theta[i] = unscale_theta_torch(theta_hat_hat).cpu()
+
+            return {
                 'theta_mean': torch.mean(all_unscaled_theta, dim=0).numpy().tolist(),
                 'theta_std': torch.std(all_unscaled_theta, dim=0).numpy().tolist(),
                 'theta_relative_std': (
-                        torch.std(all_unscaled_theta, dim=0) / unscaled_theta.detach().cpu()).numpy().tolist(),
+                        torch.std(all_unscaled_theta, dim=0) / unscaled_theta).numpy().tolist(),
                 'crlb': {key: val.tolist() for key, val in crlb.items()},
+                'unscaled_theta': unscaled_theta.numpy().tolist(),
+                'stress_pred': stress_pred.tolist(),
+                'stress_true': stress[0].tolist(),
+                'signal0': signal[0].tolist(),
             }
 
-        return out
+        return get_crlb_
+
+
+def floatify(x: float | list | dict):
+    if isinstance(x, list):
+        return [floatify(xi) for xi in x]
+    elif isinstance(x, dict):
+        return {key: floatify(val) for key, val in x.items()}
+    else:
+        return float(x)
 
 
 class ModelMetricsTask(ModuleTask):
@@ -597,9 +588,13 @@ class ModelMetricsTask(ModuleTask):
         with torch.no_grad():
             for exp_name, (_nn_input, _signal, _stress) in measured_experiments.items():
                 _theta_hat = trained_model(torch.unsqueeze(torch.from_numpy(_nn_input), 0).float().to(device))
-                _stress_hat = get_random_pseudo_experiment(scaled_theta=_theta_hat[0].cpu().numpy(),
-                                                           signal_correct_representation=_signal)
-                unscaled_theta = unscale_theta_torch(_theta_hat).cpu().numpy()
+                if prediction_is_scaled:
+                    unscaled_theta = unscale_theta_torch(_theta_hat).cpu().numpy()
+                else:
+                    unscaled_theta = _theta_hat.cpu().numpy()
+
+                _stress_hat = get_random_pseudo_experiment(theta=_theta_hat[0].cpu().numpy(),
+                                                           signal_correct_representation=_signal, is_scaled=prediction_is_scaled)
                 _, new_values, old_values = simplex(unscaled_theta=unscaled_theta,
                                                     true_stress=np.expand_dims(_stress, 0),
                                                     signal=np.expand_dims(_signal, 0),
@@ -607,7 +602,7 @@ class ModelMetricsTask(ModuleTask):
                 metric_results[f'exp/{exp_name}o'] = old_values[0]
                 metric_results[f'exp/{exp_name}n'] = new_values[0]
         metric_results |= {
-                key: {key: float(val) for key, val in val_dict.items()} for key, val_dict in
+                key: {key: floatify(val) for key, val in val_dict.items()} for key, val_dict in
                 evaluate_model(
                     valid_dataloader_kwargs=other_training_params.get('valid_dataloader_kwargs', {}),
                     model_factory=model_factory,
@@ -624,8 +619,8 @@ class ModelMetricsTask(ModuleTask):
                     unscale_theta_torch=unscale_theta_torch,
                     scale_theta_torch=scale_theta_torch,
                     prediction_is_scaled=prediction_is_scaled,
+                    store_limit=20000,
                 ).items()}
-        print(f'metrics: {metric_results}')
         return metric_results
 
 

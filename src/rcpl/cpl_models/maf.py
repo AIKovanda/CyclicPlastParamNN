@@ -208,9 +208,7 @@ def random_cyclic_plastic_loading_engine(k0: np.ndarray, kap: np.ndarray, a: np.
                                          epsp: np.ndarray, epspc: np.ndarray,
                                          directors: np.ndarray, reversal_ids: np.ndarray):
     kiso = directors / kap[1] * (1 - (1 - k0[0] * kap[1]) * np.exp(-SQR32 * kap[0] * kap[
-        1] * epspc))  # Vyvoj kiso jako funkce epspc, rovnou orientovane ve smeru narustajici plasticke deformace.
-    #    kiso = kiso + directors/kap[4]*(1-np.exp(-SQR32 * kap[3] * kap[4] * epspc))  # Odkomentuj k aktivaci druhe funkce isotropniho zpevneni
-    #    kiso = kiso + directors/kap[6]*(1-np.exp(-SQR32 * kap[5] * kap[6] * epspc))  # Odkomentuj k aktivaci treti funkce isotropniho zpevneni
+        1] * epspc))
     assert len(kiso) == len(epsp)
 
     alp = np.zeros((len(a), len(epsp)), dtype=np.float64)
@@ -218,17 +216,17 @@ def random_cyclic_plastic_loading_engine(k0: np.ndarray, kap: np.ndarray, a: np.
     epsp_ref = epsp[0]
     k = 0
     for i, epsp_i in enumerate(epsp):
-        # Spocita absolutni hodnotu noveho prirustku plasticke deformace v aktualnim segmentu
+        # Calculates the absolute value of the new plastic strain increment in the current segment.
         depsp = np.abs(epsp_i - epsp_ref)
-        # Vyvoj backstressu od posledni referencni hodnoty.
+        # The evolution of the backstress from the last reference value.
         alp[:, i] = directors[i] * a - (directors[i] * a - alp_ref) * np.exp(-c * depsp)
-        # Aktualizuje referencni hodnoty backstressu na zacatku noveho segmentu
+        # Updates backstress reference values at the beginning of a new segment.
         if i == reversal_ids[k]:
             alp_ref = alp[:, i]
             epsp_ref = epsp_i
             k += 1
 
-    sig = SQR32 * np.sum(alp, axis=0) + kiso  # Celkova napetova odezva modelu.
+    sig = SQR32 * np.sum(alp, axis=0) + kiso  # Overall stress response of the model.
     return sig
 
 
@@ -256,47 +254,3 @@ def random_cyclic_plastic_loading_engine_torch(k0: torch.Tensor, kap: torch.Tens
 
     sig = SQR32 * torch.sum(alp, dim=1) + kiso
     return sig
-
-
-
-# def random_cyclic_plastic_loading_engine_torch(k0: torch.Tensor, kap: torch.Tensor, a: torch.Tensor, c: torch.Tensor,
-#                                                epsp: torch.Tensor, epspc: torch.Tensor,
-#                                                directors: torch.Tensor, reversal_ids: torch.Tensor):
-#     kiso = directors.repeat(kap.shape[0], 1) / kap[:, 1:2] * (
-#                 1 - (1 - k0 * kap[:, 1:2]) * torch.exp(-SQR32 * kap[:, 0:1] * kap[:, 1:2] * epspc))
-#     alp = torch.zeros((*a.shape, epsp.shape[-1]), dtype=kap.dtype, device=epsp.device)
-#     alp_ref = torch.zeros(*a.shape, dtype=kap.dtype, device=epsp.device)
-#     epsp_ref = epsp[:, :1]
-#     k = 0
-#     for i in range(epsp.shape[-1]):
-#         depsp = torch.abs(epsp[:, i: i + 1] - epsp_ref)
-#         alp[..., i] = directors[i] * a - (directors[i] * a - alp_ref) * torch.exp(-c * depsp)
-#         if i == reversal_ids[k]:  # Use .item() to extract the value from the tensor
-#             alp_ref = alp[..., i]
-#             epsp_ref = epsp[:, i: i + 1]
-#             k += 1
-#
-#     sig = SQR32 * torch.sum(alp, dim=1) + kiso
-#     return sig
-
-
-#
-#
-# def get_random_pseudo_experiment(dim, kappa_dim, experiment: Experiment, vector_params: np.ndarray = None):
-#     if vector_params is None:
-#         model_params = RandomCyclicPlasticLoadingParams.generate_params(
-#             experiment=experiment,
-#             dim=dim,
-#             kappa_dim=kappa_dim,
-#         )
-#     else:
-#         model_params = RandomCyclicPlasticLoadingParams(
-#             params=vector_params,
-#             experiment=experiment,
-#             dim=dim,
-#             kappa_dim=kappa_dim,
-#         )
-#     sig = random_cyclic_plastic_loading(**model_params.params, epsp=experiment.epsp)
-#     # if sig.max() > 5000:
-#     #     print(f'Parameters: {model_params.params}. Max of sig is {sig.max()}.')
-#     return sig, model_params

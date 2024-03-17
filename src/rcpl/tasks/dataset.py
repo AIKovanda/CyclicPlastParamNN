@@ -251,9 +251,12 @@ class GetRandomPseudoExperimentTask(ModuleTask):
         ]
 
     def run(self, unscale_theta: callable, model_factory: CPLModelFactory) -> Callable:
-        def get_random_pseudo_experiment_(scaled_theta, signal_correct_representation: np.ndarray):
-            theta = unscale_theta(scaled_theta)
-            num_model = model_factory.make_model(theta)
+        def get_random_pseudo_experiment_(theta, signal_correct_representation: np.ndarray, is_scaled: bool = True):
+            if is_scaled:
+                unscaled_theta = unscale_theta(theta)
+            else:
+                unscaled_theta = theta
+            num_model = model_factory.make_model(unscaled_theta)
             return num_model.predict_stress(signal_correct_representation)
         return get_random_pseudo_experiment_
 
@@ -335,15 +338,14 @@ class GetCrlbTask(ModuleTask):
         ]
 
     def run(self, model_factory: CPLModelFactory, scale_type: str | None) -> Callable:
-        raise NotImplementedError
 
-        def get_crlb_(epsp, unscaled_theta):
-            assert epsp is not None
+        def get_crlb_(signal, unscaled_theta):
+            assert signal is not None
             assert len(unscaled_theta.shape) == 1
             unscaled_theta = unscaled_theta.detach().cpu().clone().type(torch.float64)
             unscaled_theta.requires_grad = True
             num_model = model_factory.make_model(unscaled_theta)
-            sig_pred = num_model.predict_stress_torch(epsp=torch.tensor(epsp, dtype=torch.float64))
+            sig_pred = num_model.predict_stress_torch(signal)
 
             grad_a = torch.zeros((len(unscaled_theta), len(sig_pred)), dtype=torch.float64)
             for id_ in trange(len(sig_pred), desc='Calculating gradients of theta'):

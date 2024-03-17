@@ -56,8 +56,8 @@ class LSTM(nn.Module):
             else:
                 out = out[:, -1, :]
         # out: (n, 128)
-        for i, fc in enumerate(self.fcs):
-            out = fc(out)
+        for i, ffn in enumerate(self.fcs):
+            out = ffn(out)
             # relu everywhere expect last layer
             if i < len(self.fcs) - 1:
                 out = torch.relu(out)
