@@ -6,7 +6,7 @@ from taskchain.task import Config
 
 from rcpl import config
 from rcpl.optimization.paper_optim import get_chain
-from rcpl.simplex import simplex_one
+from rcpl.utils.simplex import simplex_one
 
 
 class ChainPredictor:
