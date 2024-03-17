@@ -362,7 +362,8 @@ class TrainModelTask(ModuleTask):
                                         device=device,
                                         valid_dataloader_kwargs=other_training_params.get('valid_dataloader_kwargs', {}),
                                         get_random_pseudo_experiment=get_random_pseudo_experiment,
-                                    ).items():
+                                        eval_type='raw',
+                                    )['raw'].items():
                                 writer.add_scalar(metric_name, metric_val, total_batch_id)
                                 reporter.add_scalar(metric_name, metric_val, total_batch_id)
 

@@ -1,0 +1,33 @@
+tasks: rcpl.tasks.dataset.*
+
+exp_generator:
+  class: rcpl.experiment.EpsPRandomExperimentGenerator
+  kwargs:
+    dist_type: beta
+    epsp_dist_config:
+      num_reversals: 43
+      alpha: 2
+      beta: 6
+      return_same_chance: 0.2
+      min_step: 0.0002
+      bound: 0.007
+    experiment_kwargs:
+      crop_signal: [0, 681]
+
+exp_representation: ['geom', 17, 20]
+cpl_model_channels: ['epsp']
+x_channels: ['stress', 'epsp']
+
+model_factory:
+    class: rcpl.cpl_models.custom_model.CustomModelFactory
+    kwargs:
+      params_bound:
+        alpha: [0, 5]
+        beta1: [0, 5]
+      model_kwargs:
+        custom_parameter: 1
+
+split: [0, 100000, 102000, 112000]
+n_samples_for_stats: 100000
+
+scale_type: 'standard'  # 'standard' or 'minmax'

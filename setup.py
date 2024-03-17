@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="rcpl",
-    version="0.0.1",
+    version="1.0.0",
     author="Martin Kovanda",
     author_email="kovanda.physics@gmail.com",
     description="Random Cyclic Plastic Loading",
