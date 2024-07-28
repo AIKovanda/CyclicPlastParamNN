@@ -22,18 +22,22 @@ def to_optimize_one(unscaled_theta, true_stress, signal_, model_factory: CPLMode
 
 
 def simplex(unscaled_theta: np.ndarray, true_stress: np.ndarray, signal: np.ndarray, model_factory: CPLModelFactory, verbose=True) -> tuple[
-        np.ndarray, list, list]:
+        np.ndarray, list, list, list, list]:
     opt_theta = np.zeros_like(unscaled_theta)
     new_values = []
     old_values = []
+    num_iters = []
+    num_funcalls = []
     for i, (theta_i, true_stress_i, signal_i) in enumerate(zip(unscaled_theta, true_stress, signal)):
-        new_theta_i, new_value, now_value = simplex_one(theta_i, true_stress_i, signal_i, model_factory=model_factory, verbose=verbose)
+        new_theta_i, new_value, now_value, num_iter, num_funcall = simplex_one(theta_i, true_stress_i, signal_i, model_factory=model_factory, verbose=verbose)
         opt_theta[i] = new_theta_i
         # print('New:', new_value)
         # print('Old:', now_value)
         new_values.append(new_value)
         old_values.append(now_value)
-    return opt_theta, new_values, old_values
+        num_iters.append(num_iter)
+        num_funcalls.append(num_funcall)
+    return opt_theta, new_values, old_values, num_iters, num_funcalls
 
 
 def simplex_one(unscaled_theta: np.ndarray, true_stress: np.ndarray, signal: np.ndarray, model_factory: CPLModelFactory, verbose=True, **fmin_kwargs):
@@ -50,12 +54,11 @@ def simplex_one(unscaled_theta: np.ndarray, true_stress: np.ndarray, signal: np.
     assert validate(unscaled_theta, model_factory.simplex_lower_bound, model_factory.simplex_upper_bound)
     now_value = to_optimize_one(unscaled_theta, true_stress, signal, model_factory=model_factory)
     # print('Now:', now_value)
-    new_theta_i = fmin(
+    new_theta_i, f_min, num_iter, num_funcall, _ = fmin(
         partial(to_optimize_one, true_stress=true_stress, signal_=signal, model_factory=model_factory),
-        unscaled_theta, disp=0, **fmin_kwargs)
+        unscaled_theta, disp=0, full_output=True, **fmin_kwargs)
     assert validate(new_theta_i, model_factory.simplex_lower_bound, model_factory.simplex_upper_bound)
-    new_value = to_optimize_one(new_theta_i, true_stress, signal, model_factory=model_factory)
-    if now_value < new_value:
+    if now_value < f_min:
         new_theta_i = unscaled_theta
         print('BUG - new is worse')
-    return new_theta_i, new_value, now_value
+    return new_theta_i, f_min, now_value, num_iter, num_funcall

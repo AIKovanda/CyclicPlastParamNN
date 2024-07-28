@@ -32,12 +32,15 @@ class ChainPredictor:
     def model_metrics(self):
         return self.chain.model_metrics.value
 
-    def get_experiment_data(self, _exp_path):
-        epsp, stress = self.chain.real_experiment.value(_exp_path)[1:]
+    def get_experiment_data(self, _exp_path, pred_len=None):
+        epsp, stress = self.chain.real_experiment.value(_exp_path, max_len=pred_len)[1:]
         return epsp[0], stress[0]
 
-    def predict_from_json(self, _exp_path):
-        model_input, signal, stress = self.chain.real_experiment.value(_exp_path)
+    def predict_from_json(self, _exp_path, pred_len=None):
+        model_input, signal, _ = self.chain.real_experiment.value(_exp_path, max_len=pred_len)
+        return self.predict_single_data(model_input, signal)
+
+    def predict_single_data(self, model_input, signal):
         net = self.chain.trained_model.value
         torch_exp = torch.unsqueeze(torch.from_numpy(model_input), 0).float().to(self.device)
         net.eval()
@@ -48,9 +51,7 @@ class ChainPredictor:
         else:
             unscaled_theta_prediction = theta_hat.cpu().numpy()[0]
 
-        num_model = self.chain.model_factory.value.make_model(
-            torch.from_numpy(unscaled_theta_prediction).double().cpu())
-        stress_pred = num_model.predict_stress_torch(torch.from_numpy(signal))
+        stress_pred = self.predict_single_stress(signal, unscaled_theta_prediction)
         return unscaled_theta_prediction, stress_pred
 
     def predict_stress(self, _exp_path, theta=None):
@@ -60,21 +61,30 @@ class ChainPredictor:
         num_model = self.chain.model_factory.value.make_model(torch.from_numpy(theta).double().cpu())
         return signal, stress, num_model.predict_stress_torch(torch.from_numpy(signal))
 
-    def predict_from_json_simplex(self, _exp_path, verbose=True, **fmin_kwargs):
-        return self.run_simplex_on_exp(_exp_path, self.predict_from_json(_exp_path)[0], verbose=verbose, **fmin_kwargs)
+    def predict_from_json_simplex(self, _exp_path, verbose=True, pred_len=None, simplex_len=None, **fmin_kwargs):
+        return self.run_simplex_on_exp(_exp_path, self.predict_from_json(_exp_path)[0], verbose=verbose, pred_len=pred_len, simplex_len=simplex_len, **fmin_kwargs)
 
-    def run_simplex_on_exp(self, _exp_path, unscaled_theta_prediction, **fmin_kwargs):
-        model_input, signal, stress = self.chain.real_experiment.value(_exp_path)
-        return self.run_simplex(signal, stress, unscaled_theta_prediction, **fmin_kwargs)
+    def run_simplex_on_exp(self, _exp_path, unscaled_theta_prediction, pred_len=None, simplex_len=None, **fmin_kwargs):
+        model_input, simplex_signal, simplex_stress = self.chain.real_experiment.value(_exp_path, max_len=simplex_len)
+        unscaled_theta_opt, stress_pred_opt, (n_score, o_score) = self.run_simplex(
+            simplex_signal, simplex_stress, unscaled_theta_prediction, **fmin_kwargs)
+
+        _, signal, stress = self.chain.real_experiment.value(_exp_path, max_len=pred_len)
+        num_model = self.chain.model_factory.value.make_model(torch.from_numpy(unscaled_theta_opt).double().cpu())
+        return unscaled_theta_opt, num_model.predict_stress_torch(torch.from_numpy(signal)), (n_score, o_score)
 
     def run_simplex(self, signal, stress, unscaled_theta_prediction, verbose=False, **fmin_kwargs):
-        unscaled_theta_opt, n_score, o_score = simplex_one(unscaled_theta_prediction, stress, signal,
-                                                           self.chain.model_factory.value, **fmin_kwargs)
+        unscaled_theta_opt, n_score, o_score, _, _ = simplex_one(unscaled_theta_prediction, stress, signal,
+                                                                 self.chain.model_factory.value, **fmin_kwargs)
         if verbose:
             print(f'Origin score: {o_score:.2f}, Nelder-Mead score: {n_score:.2f}')
+        stress_pred_opt = self.predict_single_stress(signal, unscaled_theta_opt)
+        return unscaled_theta_opt, stress_pred_opt, (n_score, o_score)
+
+    def predict_single_stress(self, signal, unscaled_theta_opt):
         num_model = self.chain.model_factory.value.make_model(torch.from_numpy(unscaled_theta_opt).double().cpu())
         stress_pred_opt = num_model.predict_stress_torch(torch.from_numpy(signal))
-        return unscaled_theta_opt, stress_pred_opt, (n_score, o_score)
+        return stress_pred_opt
 
     def benchmark(self, _exp_path, num_timeit=1):
         model_input, signal, stress = self.chain.real_experiment.value(_exp_path)

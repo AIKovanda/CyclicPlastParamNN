@@ -1,3 +1,5 @@
+import hashlib
+from datetime import datetime
 from itertools import chain
 from pathlib import Path
 from typing import Callable
@@ -22,11 +24,18 @@ from rcpl.utils.reporter import Reporter
 from rcpl.utils.simplex import simplex
 
 
+def hash_numpy_array(array: torch.Tensor) -> list[str]:
+    np_array = array.cpu().numpy()
+    return [hashlib.sha256(np_array[i].tobytes()).hexdigest()[:16] for i in range(len(np_array))]
+
+
 def evaluate_model(valid_dataloader_kwargs, model_factory: CPLModelFactory, dataset_info, x_metrics, y_metrics, model,
                    val_dataset, device, get_random_pseudo_experiment, eval_type='raw', use_tqdm=False,
                    tqdm_message=None, unscale_theta_torch=None, scale_theta_torch=None, prediction_is_scaled=True,
                    store_limit=0):
     model.eval()
+    batch_hashes = []
+    true_vals = {f'true_{param}': [] for param in dataset_info['labels']}
 
     labels = dataset_info['labels']
     train_ldr = DataLoader(val_dataset, **valid_dataloader_kwargs)
@@ -36,34 +45,48 @@ def evaluate_model(valid_dataloader_kwargs, model_factory: CPLModelFactory, data
     if use_tqdm:
         train_ldr = tqdm(train_ldr, ncols=120, desc=tqdm_message)
     for batch_id, (batch_x, batch_y, *signal) in enumerate(train_ldr):
+        batch_hashes.extend(hash_numpy_array(batch_x))
         x_true = batch_x.to(device)
         y_true = batch_y.to(device)
+        y_true_unscaled = unscale_theta_torch(y_true.clone())
+        for y_true_unscaled_i in y_true_unscaled:
+            for param_value, param_name in zip(y_true_unscaled_i.cpu().numpy(), labels):
+                true_vals[f'true_{param_name}'].append(param_value)
+
         with torch.no_grad():
             # comparing x_pred and x_true
             signal = x_true[:, 1:, :] if len(signal) == 0 else signal[0]  # because *signal gives a list of one element
+            prediction_start = datetime.now()
             y_pred_raw = model(x_true)
+            prediction_end = datetime.now()
             for reporter_id, use_simplex in enumerate([False, True]):
                 if use_simplex and eval_type == 'raw':
                     continue
                 if not use_simplex and eval_type == 'simplex':
                     continue
 
-                if use_simplex:
-                    if prediction_is_scaled:
-                        unscaled_y_pred = unscale_theta_torch(y_pred_raw.clone())
-                    else:
-                        unscaled_y_pred = y_pred_raw.clone()
+                if prediction_is_scaled:
+                    unscaled_y_pred = unscale_theta_torch(y_pred_raw.clone())
+                else:
+                    unscaled_y_pred = y_pred_raw.clone()
 
-                    unscaled_y_pred, new_values, old_values = simplex(
+                if use_simplex:
+                    simplex_start = datetime.now()
+                    unscaled_y_pred, new_values, old_values, num_iters, num_funcalls = simplex(
                         unscaled_theta=unscaled_y_pred.cpu().numpy(),
                         true_stress=x_true[:, 0, :].cpu().numpy(),
                         signal=signal.cpu().numpy(),
                         model_factory=model_factory,
                         verbose=False,
                     )
+                    simplex_end = datetime.now()
                     unscaled_y_pred = torch.from_numpy(unscaled_y_pred).to(device)
-                    reporters[reporter_id].add_data('old_x_l2', np.mean(old_values))
-                    reporters[reporter_id].add_data('new_x_l2', np.mean(new_values))
+                    reporters[reporter_id].add_data('old_x_l2/val', np.mean(old_values))
+                    reporters[reporter_id].add_data('new_x_l2/val', np.mean(new_values))
+                    reporters[reporter_id].add_data('simp_time/val', (simplex_end - simplex_start).total_seconds() / len(new_values))
+                    for num_iter, num_funcall in zip(num_iters, num_funcalls):
+                        reporters[reporter_id].add_data('num_iter/val', num_iter)
+                        reporters[reporter_id].add_data('num_funcall/val', num_funcall)
                     y_pred_scaled = scale_theta_torch(unscaled_y_pred)
 
                 else:
@@ -71,27 +94,38 @@ def evaluate_model(valid_dataloader_kwargs, model_factory: CPLModelFactory, data
                         y_pred_scaled = y_pred_raw.clone()
                     else:
                         y_pred_scaled = scale_theta_torch(y_pred_raw.clone())
-                
-                reporters[reporter_id].add_data('Loss/val/_all', mse_loss_func(y_pred_scaled, y_true).item())
+
+                reporters[reporter_id].add_data('loss/val/_all', mse_loss_func(y_pred_scaled, y_true).item())
+                reporters[reporter_id].add_data('pred_time/val', (prediction_end - prediction_start).total_seconds() / len(y_true))
                 for metric_name, metric_func in y_metrics.items():
                     reporters[reporter_id].add_data(f'{metric_name}/val', metric_func(y_pred=y_pred_scaled, y_true=y_true))
 
                 if labels is not None:
-                    for param_value, param_name in zip(torch.mean((y_pred_scaled - y_true) ** 2, dim=0).cpu().numpy().tolist(), labels):
-                        reporters[reporter_id].add_data(f'{param_name}/val', param_value)
+                    for param_value, param_name in zip(
+                            torch.mean((y_pred_scaled - y_true) ** 2, dim=0).cpu().numpy(), labels):
+                        reporters[reporter_id].add_data(f'loss/val/{param_name}', param_value)
+                    for pred_param in unscaled_y_pred:
+                        for param_value, param_name in zip(pred_param.cpu().numpy(), labels):
+                            reporters[reporter_id].add_data(f'value/val/{param_name}', param_value)
 
                 # comparing x_pred and x_true
                 if len(x_metrics) > 0:
                     for item_id, (x_i_true, y_i_pred_npy, signal_i) in enumerate(zip(x_true.detach(),
-                                  y_pred_scaled.detach().cpu().numpy(), signal.cpu().numpy())):
+                                                                                     y_pred_scaled.detach().cpu().numpy(),
+                                                                                     signal.cpu().numpy())):
                         x_i_pred = torch.from_numpy(
-                            get_random_pseudo_experiment(theta=y_i_pred_npy, signal_correct_representation=signal_i, is_scaled=True)).to(device)
+                            get_random_pseudo_experiment(theta=y_i_pred_npy, signal_correct_representation=signal_i,
+                                                         is_scaled=True)).to(device)
 
                         for metric_name, metric_func in x_metrics.items():
                             reporters[reporter_id].add_data(f'{metric_name}/val', metric_func(x_pred=x_i_pred, x_true=x_i_true[:1]))
 
     model.train()
-    result = {}
+    result = {
+        'meta': {
+            'batch_hashes': batch_hashes,
+            'batch_hash': hashlib.sha256(''.join(batch_hashes).encode()).hexdigest()[:16],
+        } | true_vals}
     assert eval_type in ['raw', 'simplex', 'both']
     if eval_type == 'raw' or eval_type == 'both':
         result['raw_data'] = reporters[0].get_stored()
@@ -128,7 +162,7 @@ class RealExperimentTask(ModuleTask):
         ]
 
     def run(self, dataset_info: dict, takes_max_length: int | None, takes_channels: list[str]) -> Callable:
-        def get_prepared_experiment(experiment_path: Path | str):
+        def get_prepared_experiment(experiment_path: Path | str, max_len=None):
             if isinstance(experiment_path, str):
                 if not experiment_path.endswith('.json'):
                     experiment_path += '.json'
@@ -136,11 +170,15 @@ class RealExperimentTask(ModuleTask):
             experiment = Experiment(json_path=experiment_path)
             nn_input = experiment.get_signal_representation(dataset_info['exp_representation'], channels=takes_channels)
             stress = experiment.get_signal_representation(dataset_info['exp_representation'], channels=['stress'])
-            signal = experiment.get_signal_representation(dataset_info['exp_representation'], channels=dataset_info["cpl_model_channels"])
+            signal = experiment.get_signal_representation(dataset_info['exp_representation'],
+                                                          channels=dataset_info["cpl_model_channels"])
+
+            max_len = max_len if max_len is not None else takes_max_length
+            max_len = max(max_len, takes_max_length) if takes_max_length is not None else max_len
             if takes_max_length is not None:
                 nn_input = nn_input[..., :takes_max_length]
-                stress = stress[..., :takes_max_length]
-                signal = signal[..., :takes_max_length]
+                stress = stress[..., :max_len]
+                signal = signal[..., :max_len]
             return nn_input, signal, stress
 
         return get_prepared_experiment
@@ -184,7 +222,7 @@ class LossFuncTask(ModuleTask):
                         num_model = model_factory.make_model(theta=y_pred_unscaled)
                         x_pred = num_model.predict_stress_torch_batch(signal=signal.float().to(y_pred_unscaled.device))
                         x_mse_loss = x_scale * F.mse_loss(
-                            x_pred[:, :], x_true[:, 0, :], reduction="mean") / (dataset_info['x_std']**2)
+                            x_pred[:, :], x_true[:, 0, :], reduction="mean") / (dataset_info['x_std'] ** 2)
 
                 mixed_mse_loss = y_mse_loss + x_mse_loss
                 return mixed_mse_loss, {'Loss/train': mixed_mse_loss.item(), 'Loss/train/stress': x_mse_loss.item(),
@@ -249,7 +287,9 @@ class TrainModelTask(ModuleTask):
         if do_compile:
             model = torch.compile(model)
 
-        opt = getattr(torch.optim, persistent_training_params['optim'])(model.parameters(), **persistent_training_params.get('optim_kwargs', {}))
+        opt = getattr(torch.optim, persistent_training_params['optim'])(model.parameters(),
+                                                                        **persistent_training_params.get('optim_kwargs',
+                                                                                                         {}))
 
         epochs = persistent_training_params['epochs']
         train_ldr = DataLoader(train_dataset, **persistent_training_params.get('dataloader_kwargs', {}))
@@ -297,12 +337,16 @@ class TrainModelTask(ModuleTask):
                     with torch.no_grad():
                         for exp_name, (_nn_input, _signal, _stress) in measured_experiments.items():
                             _theta_hat = model(torch.unsqueeze(torch.from_numpy(_nn_input), 0).float().to(device))
-                            _stress_hat = get_random_pseudo_experiment(theta=_theta_hat[0].cpu().numpy(), signal_correct_representation=_signal, is_scaled=True)
+                            _stress_hat = get_random_pseudo_experiment(theta=_theta_hat[0].cpu().numpy(),
+                                                                       signal_correct_representation=_signal,
+                                                                       is_scaled=True)
                             reporter.add_data(f'exp/{exp_name}', np.mean((_stress_hat - _stress) ** 2))
                             if (total_batch_id + 1) % 10 == 0:
                                 unscaled_theta = unscale_theta_torch(_theta_hat).cpu().numpy()
-                                _, new_values, old_values = simplex(unscaled_theta=unscaled_theta, true_stress=np.expand_dims(_stress, 0), signal=np.expand_dims(_signal, 0),
-                                                                    model_factory=model_factory, verbose=False)
+                                _, new_values, old_values, _, _ = simplex(unscaled_theta=unscaled_theta,
+                                                                          true_stress=np.expand_dims(_stress, 0),
+                                                                          signal=np.expand_dims(_signal, 0),
+                                                                          model_factory=model_factory, verbose=False)
                                 reporter.add_data(f'exp/{exp_name}o', old_values[0])
                                 reporter.add_data(f'exp/{exp_name}n', new_values[0])
 
@@ -317,9 +361,12 @@ class TrainModelTask(ModuleTask):
                         # comparing x_pred and x_true
                         if len(x_metrics) > 0:
                             for item_id, (x_i_true, y_i_pred_npy, signal_i) in enumerate(zip(x_true.detach(),
-                                          y_pred.detach().cpu().numpy(), signal.cpu().numpy())):
+                                                                                             y_pred.detach().cpu().numpy(),
+                                                                                             signal.cpu().numpy())):
                                 x_i_pred = torch.from_numpy(
-                                    get_random_pseudo_experiment(theta=y_i_pred_npy, signal_correct_representation=signal_i, is_scaled=True)).to(device)
+                                    get_random_pseudo_experiment(theta=y_i_pred_npy,
+                                                                 signal_correct_representation=signal_i,
+                                                                 is_scaled=True)).to(device)
 
                                 for metric_name, metric_func in x_metrics.items():
                                     # if item_id == 0:
@@ -339,9 +386,12 @@ class TrainModelTask(ModuleTask):
                                 writer.add_scalar(loss_name, reporter.get_mean(loss_name), total_batch_id)
 
                             for exp_name in measured_experiments.keys():
-                                writer.add_scalar(f'exp/{exp_name}', reporter.get_mean(f'exp/{exp_name}'), total_batch_id)
-                                writer.add_scalar(f'exp/{exp_name}o', reporter.get_mean(f'exp/{exp_name}o'), total_batch_id)
-                                writer.add_scalar(f'exp/{exp_name}n', reporter.get_mean(f'exp/{exp_name}n'), total_batch_id)
+                                writer.add_scalar(f'exp/{exp_name}', reporter.get_mean(f'exp/{exp_name}'),
+                                                  total_batch_id)
+                                writer.add_scalar(f'exp/{exp_name}o', reporter.get_mean(f'exp/{exp_name}o'),
+                                                  total_batch_id)
+                                writer.add_scalar(f'exp/{exp_name}n', reporter.get_mean(f'exp/{exp_name}n'),
+                                                  total_batch_id)
                             if labels is not None:
                                 for param_label in labels:
                                     writer.add_scalar(f'{param_label}/train',
@@ -353,17 +403,18 @@ class TrainModelTask(ModuleTask):
 
                         if (total_batch_id + 1) % other_training_params.get('evaluate_n', np.inf) == 0:
                             for metric_name, metric_val in evaluate_model(
-                                        model_factory=model_factory,
-                                        dataset_info=dataset_info,
-                                        x_metrics=x_metrics,
-                                        y_metrics=y_metrics,
-                                        model=model,
-                                        val_dataset=val_dataset,
-                                        device=device,
-                                        valid_dataloader_kwargs=other_training_params.get('valid_dataloader_kwargs', {}),
-                                        get_random_pseudo_experiment=get_random_pseudo_experiment,
-                                        eval_type='raw',
-                                    )['raw'].items():
+                                    model_factory=model_factory,
+                                    dataset_info=dataset_info,
+                                    x_metrics=x_metrics,
+                                    y_metrics=y_metrics,
+                                    model=model,
+                                    val_dataset=val_dataset,
+                                    device=device,
+                                    valid_dataloader_kwargs=other_training_params.get('valid_dataloader_kwargs', {}),
+                                    get_random_pseudo_experiment=get_random_pseudo_experiment,
+                                    eval_type='raw',
+                                    unscale_theta_torch=unscale_theta_torch,
+                            )['raw'].items():
                                 writer.add_scalar(metric_name, metric_val, total_batch_id)
                                 reporter.add_scalar(metric_name, metric_val, total_batch_id)
 
@@ -385,6 +436,7 @@ class TrainModelTask(ModuleTask):
                     total_batch_id += 1
                     if scheduler is not None:
                         scheduler.step()
+                        # print(f'LR: {scheduler.get_last_lr()[-1]}')
 
             reporter.save(data.dir / 'reporter.pkl')
             torch.save(model.state_dict(), data.dir / f'weights.pt')
@@ -462,7 +514,16 @@ class TrainedModelTask(ModuleTask):
         if do_compile:
             model = torch.compile(model)
         if is_trainable:
-            model.load_state_dict(torch.load(str(weights_path)))
+            state_dict = torch.load(str(weights_path))
+            try:
+                model.load_state_dict(state_dict)
+            except:
+                # Create a new state dictionary with the correct keys
+                new_state_dict = {}
+                for key, value in state_dict.items():
+                    new_key = key.replace('_orig_mod.', '')
+                    new_state_dict[new_key] = value
+                model.load_state_dict(new_state_dict)
         else:
             model.model_factory = model_factory
         return model
@@ -471,7 +532,8 @@ class TrainedModelTask(ModuleTask):
 class ValidateCrlbTask(ModuleTask):
     class Meta:
         data_class = InMemoryData
-        input_tasks = [RealExperimentTask, GetCrlbTask, TrainedModelTask, UnscaleThetaTorchTask, DatasetInfoTask, ModelFactoryTask]
+        input_tasks = [RealExperimentTask, GetCrlbTask, TrainedModelTask, UnscaleThetaTorchTask, DatasetInfoTask,
+                       ModelFactoryTask]
         parameters = [
             Parameter("device", default="cuda", ignore_persistence=True),
             Parameter("crlb_runs", default=1000),
@@ -524,7 +586,10 @@ class ValidateCrlbTask(ModuleTask):
                         representation=dataset_info['exp_representation'],
                         crop_signal=crop_signal,
                     )
-                    theta_hat_hat = trained_model(experiment.get_signal_representation(dataset_info['exp_representation'], channels=takes_channels).float().unsqueeze(0).to(device))[0]
+                    theta_hat_hat = trained_model(
+                        experiment.get_signal_representation(dataset_info['exp_representation'],
+                                                             channels=takes_channels).float().unsqueeze(0).to(device))[
+                        0]
                     all_unscaled_theta[i] = unscale_theta_torch(theta_hat_hat).cpu()
 
             return {
@@ -548,6 +613,8 @@ def floatify(x: float | list | dict):
     elif isinstance(x, dict):
         return {key: floatify(val) for key, val in x.items()}
     else:
+        if isinstance(x, str):
+            return x
         return float(x)
 
 
@@ -571,8 +638,10 @@ class ModelMetricsTask(ModuleTask):
             Parameter("eval_on_experiments"),
         ]
 
-    def run(self, trained_model, dataset_info: dict, test_dataset: Dataset, get_random_pseudo_experiment: Callable, real_experiment,
-            evaluate_limit: int, device: str, scale_theta_torch, unscale_theta_torch, prediction_is_scaled, other_training_params,
+    def run(self, trained_model, dataset_info: dict, test_dataset: Dataset, get_random_pseudo_experiment: Callable,
+            real_experiment,
+            evaluate_limit: int, device: str, scale_theta_torch, unscale_theta_torch, prediction_is_scaled,
+            other_training_params,
             model_factory: CPLModelFactory, eval_on_experiments) -> dict:
         measured_experiments = {exp_name: real_experiment(exp_name) for exp_name in eval_on_experiments}
 
@@ -595,33 +664,37 @@ class ModelMetricsTask(ModuleTask):
                     unscaled_theta = _theta_hat.cpu().numpy()
 
                 _stress_hat = get_random_pseudo_experiment(theta=_theta_hat[0].cpu().numpy(),
-                                                           signal_correct_representation=_signal, is_scaled=prediction_is_scaled)
-                _, new_values, old_values = simplex(unscaled_theta=unscaled_theta,
-                                                    true_stress=np.expand_dims(_stress, 0),
-                                                    signal=np.expand_dims(_signal, 0),
-                                                    model_factory=model_factory, verbose=False)
+                                                           signal_correct_representation=_signal,
+                                                           is_scaled=prediction_is_scaled)
+                _, new_values, old_values, num_iters, num_funcalls = simplex(unscaled_theta=unscaled_theta,
+                                                                             true_stress=np.expand_dims(_stress, 0),
+                                                                             signal=np.expand_dims(_signal, 0),
+                                                                             model_factory=model_factory,
+                                                                             verbose=False)
                 metric_results[f'exp/{exp_name}o'] = old_values[0]
                 metric_results[f'exp/{exp_name}n'] = new_values[0]
+                metric_results[f'exp/{exp_name}i'] = num_iters[0]
+                metric_results[f'exp/{exp_name}f'] = num_funcalls[0]
         metric_results |= {
-                key: {key: floatify(val) for key, val in val_dict.items()} for key, val_dict in
-                evaluate_model(
-                    valid_dataloader_kwargs=other_training_params.get('valid_dataloader_kwargs', {}),
-                    model_factory=model_factory,
-                    dataset_info=dataset_info,
-                    x_metrics=x_metrics,
-                    y_metrics=y_metrics,
-                    model=trained_model,
-                    val_dataset=dataset,
-                    device=device,
-                    get_random_pseudo_experiment=get_random_pseudo_experiment,
-                    eval_type='both',
-                    use_tqdm=True,
-                    tqdm_message=f'Raw + Simplex',
-                    unscale_theta_torch=unscale_theta_torch,
-                    scale_theta_torch=scale_theta_torch,
-                    prediction_is_scaled=prediction_is_scaled,
-                    store_limit=20000,
-                ).items()}
+            key: {key: floatify(val) for key, val in val_dict.items()} for key, val_dict in
+            evaluate_model(
+                valid_dataloader_kwargs=other_training_params.get('valid_dataloader_kwargs', {}),
+                model_factory=model_factory,
+                dataset_info=dataset_info,
+                x_metrics=x_metrics,
+                y_metrics=y_metrics,
+                model=trained_model,
+                val_dataset=dataset,
+                device=device,
+                get_random_pseudo_experiment=get_random_pseudo_experiment,
+                eval_type='both',
+                use_tqdm=True,
+                tqdm_message=f'Raw + Simplex',
+                unscale_theta_torch=unscale_theta_torch,
+                scale_theta_torch=scale_theta_torch,
+                prediction_is_scaled=prediction_is_scaled,
+                store_limit=20000,
+            ).items()}
         return metric_results
 
 

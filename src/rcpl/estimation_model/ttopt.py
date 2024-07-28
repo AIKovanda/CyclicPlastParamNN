@@ -12,6 +12,7 @@ class TTOptModel(AutoParameterObject):
         self.epsp = None if epsp is None else np.array(epsp)
         self.ttopt_params = ttopt_params if ttopt_params is not None else {}
         self.model_factory = None
+        self.seed = 42
 
     def train(self):
         pass
@@ -26,11 +27,11 @@ class TTOptModel(AutoParameterObject):
         return self
 
     def __call__(self, x: torch.Tensor):
-        np.random.seed(42)
         x_npy = x.cpu().numpy()
         predicted = np.zeros((x_npy.shape[0], self.model_factory.num_params))
 
         for item_id in range(x_npy.shape[0]):
+            np.random.seed(42)
 
             if self.epsp is None:
                 epsp = x_npy[item_id, 1:2, :]
@@ -57,7 +58,7 @@ class TTOptModel(AutoParameterObject):
                 **self.ttopt_params,
                 x_opt_real=np.ones(self.model_factory.num_params),  # Real value of x-minima (x; this is for test)
                 with_log=False)
-            tto.optimize(self.rank)
+            tto.optimize(self.rank, seed=self.seed)
             predicted[item_id] = tto.x_opt
 
         return torch.from_numpy(predicted).float().to(x.device)
