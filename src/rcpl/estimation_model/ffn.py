@@ -3,7 +3,7 @@ from taskchain.parameter import AutoParameterObject
 from torch import nn
 
 
-class FFN(AutoParameterObject, nn.Module):
+class FC(AutoParameterObject, nn.Module):
     def __init__(self, in_channels, inputs, layers: list[int], outputs, batchnorm=True):
         super().__init__()
         self.in_channels = in_channels

@@ -57,9 +57,11 @@ other_training_params:
     x_metrics_items: 32
     x_metrics:
       x_l2: 'x_l2'
+      x_l2_median: 'x_l2_median'
 
     y_metrics:
       y_l2: 'y_l2'
+      y_l2_median: 'y_l2_median'
 
 eval_on_experiments: [ '2023-11-23' ]
 
