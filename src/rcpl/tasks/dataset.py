@@ -21,13 +21,12 @@ class DatasetInfoTask(ModuleTask):
             Parameter("exp_generator", default=None),
             Parameter("exp_representation"),
             Parameter("model_factory"),
-            Parameter("split"),
             Parameter("cpl_model_channels"),
             Parameter("n_samples_for_stats"),
         ]
 
     def run(self, experiment, exp_generator: RandomExperimentGenerator, exp_representation,
-            model_factory: CPLModelFactory, split, cpl_model_channels: list, n_samples_for_stats) -> dict:
+            model_factory: CPLModelFactory, cpl_model_channels: list, n_samples_for_stats) -> dict:
 
         if experiment is None:
             experiment = exp_generator.generate_representation(exp_representation)
@@ -48,7 +47,6 @@ class DatasetInfoTask(ModuleTask):
             'apriori_params_lower_bound': model_factory.lower_bound.tolist(),
             'apriori_params_upper_bound': model_factory.upper_bound.tolist(),
             'model_kwargs': model_factory.model_kwargs,
-            'split': split,
             'n_samples_for_stats': n_samples_for_stats,
             'labels': random_num_model.labels(),
             'latex_labels': random_num_model.labels(latex=True),
@@ -85,13 +83,13 @@ class DatasetDirTask(ModuleTask):
             Parameter("exp_generator", default=None),
             Parameter("exp_representation"),
             Parameter("model_factory"),
-            Parameter("split"),
+            Parameter("base_dataset_size"),
             Parameter("cpl_model_channels"),
             Parameter("x_channels"),
         ]
 
     def run(self, experiment: Experiment, exp_generator: RandomExperimentGenerator, exp_representation,
-            model_factory: CPLModelFactory, split: tuple, cpl_model_channels: list, x_channels: list) -> DirData:
+            model_factory: CPLModelFactory, cpl_model_channels: list, x_channels: list, base_dataset_size: int) -> DirData:
         assert (experiment is not None) ^ (exp_generator is not None)
         assert x_channels[0] == 'stress', 'Stress channel must be included in x_channels'
         assert len(x_channels) == len(set(x_channels)), 'x_channels must be unique'
@@ -101,11 +99,11 @@ class DatasetDirTask(ModuleTask):
         if experiment is None:
             experiment = exp_generator.generate_representation(exp_representation)
 
-        x = np.zeros((split[-1], len(x_channels), experiment.get_signal_representation(exp_representation, channels=cpl_model_channels).shape[-1]), dtype=np.float32)
+        x = np.zeros((base_dataset_size, len(x_channels), experiment.get_signal_representation(exp_representation, channels=cpl_model_channels).shape[-1]), dtype=np.float32)
         random_num_model = model_factory.make_model()
-        y = np.zeros((split[-1], random_num_model.theta_len), dtype=np.float64)
+        y = np.zeros((base_dataset_size, random_num_model.theta_len), dtype=np.float64)
 
-        for i in trange(split[-1]):
+        for i in trange(base_dataset_size):
             if exp_generator is not None:
                 experiment = exp_generator.generate_representation(exp_representation)
 
@@ -118,9 +116,8 @@ class DatasetDirTask(ModuleTask):
                 x[i, 1:] = experiment.get_signal_representation(exp_representation, channels=x_channels[1:])
             y[i] = num_model.theta
 
-        for i, name in enumerate(['train', 'val', 'test']):
-            np.save(str(dataset_dir / f'{name}_x.npy'), x[split[i]:split[i + 1], :])
-            np.save(str(dataset_dir / f'{name}_y.npy'), y[split[i]:split[i + 1], :])
+        np.save(str(dataset_dir / f'x.npy'), x)
+        np.save(str(dataset_dir / f'y.npy'), y)
 
         return data
 
@@ -138,14 +135,14 @@ class ThetaHistogramTask(ModuleTask):
     def run(self, dataset_info: dict, dataset_dir: Path) -> list[Callable]:
         latex_labels = dataset_info['latex_labels']
         labels = dataset_info['labels']
-        train_y = np.load(str(dataset_dir / 'train_y.npy'))  # (N, P)
+        all_y = np.load(str(dataset_dir / 'y.npy'))  # (N, P)
 
         def hist(bins=20, figsize=(16, 5)):
             import matplotlib.pyplot as plt
-            for i in range(train_y.shape[1]):
+            for i in range(all_y.shape[1]):
                 plt.figure(figsize=figsize)
                 plt.title(f'${latex_labels[i]}$')
-                plt.hist(train_y[:, i], bins=bins)
+                plt.hist(all_y[:, i], bins=bins)
                 plt.xlabel(f'${latex_labels[i]}$')
                 plt.ylabel('Count')
                 plt.savefig(str(BASE_DIR / 'notebooks' / 'hist' / f'hist_{labels[i]}.png'))
@@ -154,9 +151,9 @@ class ThetaHistogramTask(ModuleTask):
         def hist2d(figsize=(16, 5)):
             import matplotlib.pyplot as plt
             import seaborn as sns
-            for i in range(train_y.shape[1]-1):
-                for j in range(i + 1, train_y.shape[1]):
-                    sns.jointplot(x=train_y[:, i], y=train_y[:, j], kind='hist')
+            for i in range(all_y.shape[1]-1):
+                for j in range(i + 1, all_y.shape[1]):
+                    sns.jointplot(x=all_y[:, i], y=all_y[:, j], kind='hist')
                     plt.xlabel(f'${latex_labels[i]}$')
                     plt.ylabel(f'${latex_labels[j]}$')
                     plt.savefig(str(BASE_DIR / 'notebooks' / 'hist' / f'hist2d_{labels[i]}_{labels[j]}.png'))
@@ -261,14 +258,28 @@ class GetRandomPseudoExperimentTask(ModuleTask):
         return get_random_pseudo_experiment_
 
 
+class LoadedDataset(ModuleTask):
+    class Meta:
+        data_class = InMemoryData
+        input_tasks = [DatasetDirTask]
+        parameters = []
+
+    def run(self, dataset_dir: Path) -> tuple:
+        x = np.load(dataset_dir / 'x.npy')
+        y = np.load(dataset_dir / 'y.npy')
+        return x, y
+
+
 class AbstractDatasetTask(ModuleTask):
     class Meta:
         abstract = True
 
     def run(self, experiment: Experiment, exp_representation, dataset_dir: Path, dataset_info: dict,
-            scale_type: str) -> Dataset:
-        x = torch.from_numpy(np.load(dataset_dir / f'{self.meta.split_name}_x.npy'))
-        y = torch.from_numpy(np.load(dataset_dir / f'{self.meta.split_name}_y.npy'))
+            scale_type: str, split: tuple, loaded_dataset) -> Dataset:
+        split_start = int(split[self.meta.split_start])
+        split_end = int(split[self.meta.split_start+1])
+        x = torch.from_numpy(loaded_dataset[0][split_start: split_end])
+        y = torch.from_numpy(loaded_dataset[1][split_start: split_end])
 
         if scale_type is not None:
             if scale_type == "standard":
@@ -292,40 +303,43 @@ class AbstractDatasetTask(ModuleTask):
 class TrainDatasetTask(AbstractDatasetTask):
     class Meta:
         data_class = InMemoryData
-        input_tasks = [DatasetDirTask, DatasetInfoTask]
+        input_tasks = [DatasetDirTask, DatasetInfoTask, LoadedDataset]
         parameters = [
             Parameter("experiment", default=None),
             Parameter("exp_representation"),
             Parameter("cpl_model_channels"),
+            Parameter("split"),
             Parameter("scale_type", default=None),
         ]
-        split_name = 'train'
+        split_start = 0
 
 
 class ValDatasetTask(AbstractDatasetTask):
     class Meta:
         data_class = InMemoryData
-        input_tasks = [DatasetDirTask, DatasetInfoTask]
+        input_tasks = [DatasetDirTask, DatasetInfoTask, LoadedDataset]
         parameters = [
             Parameter("experiment", default=None),
             Parameter("exp_representation"),
             Parameter("cpl_model_channels"),
+            Parameter("split"),
             Parameter("scale_type", default=None),
         ]
-        split_name = 'val'
+        split_start = 1
 
 
 class TestDatasetTask(AbstractDatasetTask):
     class Meta:
         data_class = InMemoryData
-        input_tasks = [DatasetDirTask, DatasetInfoTask]
+        input_tasks = [DatasetDirTask, DatasetInfoTask, LoadedDataset]
         parameters = [
             Parameter("experiment", default=None),
             Parameter("exp_representation"),
             Parameter("cpl_model_channels"),
+            Parameter("split"),
             Parameter("scale_type", default=None),
         ]
-        split_name = 'test'
+        split_start = 2
 
 
 class GetCrlbTask(ModuleTask):

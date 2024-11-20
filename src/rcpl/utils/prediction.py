@@ -10,13 +10,13 @@ from rcpl.utils.simplex import simplex_one
 
 
 class ChainPredictor:
-    def __init__(self, config_path=None, config_dict=None, predicts_scaled_theta=False, device='cuda'):
+    def __init__(self, config_path=None, config_dict=None, predicts_scaled_theta=False, device='cuda', context=None):
         if config_path is not None:
             config_path_ttopt = config_path
             conf_ttopt = Config(
                 config.TASKS_DIR,  # where Taskchain data should be stored
                 config_path_ttopt,
-                context={'device': device},
+                context={'device': device} | (context or {}),
                 global_vars=config,  # set global variables
             )
             self.chain = conf_ttopt.chain()

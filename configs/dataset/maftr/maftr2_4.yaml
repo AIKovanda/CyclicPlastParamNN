@@ -41,7 +41,8 @@ model_factory:
         kappa_dim: 2
         uses_log_c: false
 
-split: [0, 1000000, 1020000, 1120000]
+base_dataset_size: 10120000
+split: [9000000, 10000000, 10020000, 10120000]
 n_samples_for_stats: 1000000
 
 scale_type: 'standard'  # 'standard' or 'minmax'
